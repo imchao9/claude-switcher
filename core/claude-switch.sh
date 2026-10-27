@@ -381,84 +381,215 @@ PY_SUBSCRIPTION_IP
 }
 
 subscription_url_validate() {
-    python3 - "$1" <<'PY_SUBSCRIPTION_VALIDATE'
+    printf '%s\n' "$1" | python3 -c '
 import os
 import sys
 from urllib.parse import urlsplit
-value = sys.argv[1]
-parts = urlsplit(value)
-allowed_http = os.environ.get("CLAUDE_SWITCHER_ALLOW_INSECURE_SUBSCRIPTION") == "1"
-valid = (parts.scheme == "https" or (allowed_http and parts.scheme == "http"))
-valid = valid and bool(parts.hostname) and not any(ord(c) < 32 or c.isspace() for c in value)
-valid = valid and not parts.fragment and not parts.username and not parts.password
+try:
+    value = sys.stdin.read().rstrip("\n")
+    parts = urlsplit(value)
+    allowed_http = os.environ.get("CLAUDE_SWITCHER_ALLOW_INSECURE_SUBSCRIPTION") == "1"
+    valid = (parts.scheme == "https" or (allowed_http and parts.scheme == "http"))
+    valid = valid and bool(parts.hostname) and not any(ord(c) < 32 or c.isspace() for c in value)
+    valid = valid and not parts.fragment and not parts.username and not parts.password
+except ValueError:
+    valid = False
 raise SystemExit(0 if valid else 1)
-PY_SUBSCRIPTION_VALIDATE
+'
 }
 
 legacy_subscription_expected_ip() {
-    python3 - "$1" "$2" <<'PY_LEGACY_SUBSCRIPTION'
+    # 从私有 manifest 读取 URL；不把订阅令牌放入 Python argv。
+    python3 - "$SUBSCRIPTION_MANIFEST" "$1" <<'PY_LEGACY_SUBSCRIPTION'
+import copy
+import hashlib
 import ipaddress
+import json
 import re
 import sys
 from urllib.parse import urlsplit
+from uuid import UUID
 
-url, body_path = sys.argv[1:]
-parts = urlsplit(url)
-if (parts.scheme != "https" or parts.hostname != "sub.610247.xyz"
-        or not re.fullmatch(r"/sub/[A-Za-z0-9_-]{43}/vpn-host1\.yaml", parts.path)
-        or parts.query or parts.fragment):
-    raise SystemExit(1)
-try:
-    text = open(body_path, encoding="utf-8").read()
-except (OSError, UnicodeError):
-    raise SystemExit(1)
-residential = False
-expected = None
-for line in text.splitlines():
-    name = re.match(r"\s*-\s+name:\s*(.+?)\s*$", line)
-    if name:
-        residential = name[1].strip() == "住宅出口"
-        continue
-    server = re.match(r"\s+server:\s*([^\s#]+)\s*$", line)
-    if residential and server:
-        expected = server[1]
-        break
-if expected is None:
-    raise SystemExit(1)
-try:
-    address = ipaddress.ip_address(expected)
-except ValueError:
-    raise SystemExit(1)
-if not address.is_global:
-    raise SystemExit(1)
-rules = []
-inside = False
-for line in text.splitlines():
-    if line.strip() == "rules:":
-        inside = True
-        continue
-    if inside and line and not line[0].isspace():
-        inside = False
-    if inside:
-        item = re.match(r"\s+-\s+(.+?)\s*$", line)
+# 仅兼容已确认的那一个旧地址。保存摘要，不保存真实 URL 或令牌。
+LEGACY_URL_SHA256 = "30692aa2b68b8561cec027dff22af7c1d8fd010e6cc687c89ed2be395d42a0c1"
+
+def scalar(value):
+    value = value.strip()
+    if not value or any(ord(c) < 32 for c in value):
+        raise ValueError()
+    if value.startswith('"'):
+        result = json.loads(value)
+        if not isinstance(result, str):
+            raise ValueError()
+        return result
+    if value.startswith("'"):
+        if not re.fullmatch(r"'(?:[^']|'')*'", value):
+            raise ValueError()
+        return value[1:-1].replace("''", "'")
+    if value[0] in "!&*[{>|%@`" or ": " in value or " #" in value:
+        raise ValueError()
+    if value in ("true", "false"):
+        return value == "true"
+    if re.fullmatch(r"[0-9]+", value):
+        return int(value)
+    if value.lower() in ("null", "~", "yes", "no", "on", "off"):
+        raise ValueError()
+    return value
+
+
+def legacy_nodes(text):
+    # 旧文件使用的 block YAML 子集；拒绝引用、标签、重复字段和未知结构。
+    # 只读取 proxies，再重新生成完整配置，不复制旧 rules/DNS/控制器设置。
+    lines = text.splitlines()
+    starts = [i for i, line in enumerate(lines) if re.match(r"^proxies:", line)]
+    if len(starts) != 1 or lines[starts[0]] != "proxies:":
+        raise ValueError()
+    nodes, node, stack, list_indent, alpn_indent = [], None, [], None, None
+    for line in lines[starts[0] + 1:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if "\t" in line:
+            raise ValueError()
+        item = re.fullmatch(r"( *)- name: (.+)", line)
         if item:
-            rules.append(item[1].strip().strip('"\''))
-protected = ("claude.ai", "anthropic.com", "claude.com", "clau.de", "claudeusercontent.com")
-matches = [rule.split(",") for rule in rules]
-groups = {parts[2] for parts in matches if len(parts) == 3 and parts[0] == "DOMAIN-SUFFIX"
-          and parts[1] in protected}
-if len(groups) != 1:
+            indent = len(item[1])
+            if list_indent is not None and indent != list_indent:
+                raise ValueError()
+            list_indent = indent
+            node = {"name": scalar(item[2])}
+            nodes.append(node)
+            stack = [(indent, node)]
+            alpn_indent = None
+            continue
+        if line[0] != " ":
+            if not re.match(r"[a-zA-Z][a-zA-Z0-9_-]*:", line):
+                raise ValueError()
+            break
+        if node is None:
+            raise ValueError()
+        indent = len(line) - len(line.lstrip(" "))
+        if alpn_indent is not None and line.lstrip().startswith("- "):
+            if indent not in (alpn_indent, alpn_indent + 2):
+                raise ValueError()
+            node["alpn"].append(scalar(line.strip()[2:]))
+            continue
+        alpn_indent = None
+        field = re.fullmatch(r" *([a-zA-Z][a-zA-Z0-9_-]*):(?: (.*))?", line)
+        if not field:
+            raise ValueError()
+        key, value = field.groups()
+        while len(stack) > 1 and indent <= stack[-1][0]:
+            stack.pop()
+        if indent != stack[-1][0] + 2:
+            raise ValueError()
+        parent = stack[-1][1]
+        if key in parent:
+            raise ValueError()
+        if not value:
+            if key == "alpn" and parent is node:
+                parent[key] = []
+                alpn_indent = indent
+            elif key in ("reality-opts", "ws-opts", "headers"):
+                parent[key] = {}
+                stack.append((indent, parent[key]))
+            else:
+                raise ValueError()
+        elif key == "alpn" and parent is node and value.startswith("["):
+            parent[key] = json.loads(value)
+        else:
+            parent[key] = scalar(value)
+    if len(nodes) != 3 or len({n["name"] for n in nodes}) != 3:
+        raise ValueError()
+    return nodes
+
+
+def normalize(text):
+    nodes = legacy_nodes(text)
+    by_name = {n["name"]: n for n in nodes}
+    home = by_name["住宅出口"]
+    main = by_name["vpn-host1"]
+    backup = by_name["vpn-host1-iOS-WS"]
+    allowed_home = {"name", "type", "server", "port", "username", "password", "udp", "dialer-proxy"}
+    if (set(home) - allowed_home or home.get("type") != "socks5"
+            or home.get("dialer-proxy") != main["name"]):
+        raise ValueError()
+    address = ipaddress.ip_address(home["server"])
+    if not address.is_global or address.version != 4:
+        raise ValueError()
+    def port(node):
+        return type(node.get("port")) is int and 0 < node["port"] <= 65535
+    if not port(home) or not all(isinstance(home.get(k), str) and home[k] for k in ("username", "password")):
+        raise ValueError()
+    allowed_entry = {"name", "type", "server", "port", "uuid", "network", "tls", "udp", "flow",
+                     "servername", "client-fingerprint", "skip-cert-verify", "reality-opts", "alpn", "ws-opts"}
+    for node, network in ((main, "tcp"), (backup, "ws")):
+        if (set(node) - allowed_entry or node.get("type") != "vless" or node.get("network") != network
+                or node.get("tls") is not True or node.get("skip-cert-verify") is not False
+                or not port(node) or not all(isinstance(node.get(k), str) and node[k] for k in ("server", "servername"))):
+            raise ValueError()
+        UUID(node["uuid"])
+        node["udp"] = False
+    reality = main.get("reality-opts")
+    if (not isinstance(reality, dict) or set(reality) - {"public-key", "short-id", "support-x25519mlkem768"}
+            or not isinstance(reality.get("public-key"), str) or not reality["public-key"]
+            or not isinstance(reality.get("short-id"), str)):
+        raise ValueError()
+    ws = backup.get("ws-opts")
+    if (not isinstance(ws, dict) or set(ws) != {"path", "headers"}
+            or not isinstance(ws["path"], str) or not ws["path"].startswith("/")
+            or not isinstance(ws["headers"], dict) or set(ws["headers"]) != {"Host"}
+            or not isinstance(ws["headers"]["Host"], str) or not ws["headers"]["Host"]):
+        raise ValueError()
+    if "alpn" in backup and (not isinstance(backup["alpn"], list)
+            or not all(isinstance(v, str) for v in backup["alpn"])):
+        raise ValueError()
+    routes = []
+    for entry, suffix in ((main, "Reality"), (backup, "WS")):
+        route = copy.deepcopy(home)
+        route.update({"name": "旧订阅住宅-" + suffix, "dialer-proxy": entry["name"], "udp": False})
+        routes.append(route)
+    group = "CLAUDE-SWITCHER"
+    protected = ("claude.ai", "anthropic.com", "claude.com", "clau.de", "claudeusercontent.com")
+    document = {"mixed-port": 7890, "bind-address": "127.0.0.1", "allow-lan": False,
+                "ipv6": False, "mode": "rule", "log-level": "warning", "proxies": [main, backup] + routes,
+                "proxy-groups": [{"name": group, "type": "select", "proxies": [n["name"] for n in routes]}],
+                "rules": ["NETWORK,udp,REJECT"] + ["DOMAIN-SUFFIX," + d + "," + group for d in protected] + ["MATCH," + group],
+                "dns": {"enable": True, "listen": "127.0.0.1:1053", "ipv6": False,
+                        "enhanced-mode": "fake-ip", "fake-ip-range": "198.18.0.1/16",
+                        "fake-ip-filter": ["localhost", "+.local", "+.lan"], "respect-rules": True,
+                        "prefer-h3": False, "use-hosts": False, "use-system-hosts": False,
+                        "default-nameserver": ["https://1.1.1.1/dns-query#DIRECT"],
+                        "proxy-server-nameserver": ["https://1.1.1.1/dns-query#DIRECT"],
+                        "nameserver": ["https://1.1.1.1/dns-query#" + group]}}
+    # 各顶层字段使用 JSON flow 值（合法 YAML），保留现有 proxies: 检测契约。
+    output = []
+    for key, value in document.items():
+        if key == "proxies":
+            output.append("proxies:")
+            output.extend("  - " + json.dumps(n, ensure_ascii=False) for n in value)
+        else:
+            output.append(key + ": " + json.dumps(value, ensure_ascii=False))
+    return str(address), "\n".join(output) + "\n"
+
+try:
+    manifest_path, body_path = sys.argv[1:]
+    with open(manifest_path, encoding="utf-8") as handle:
+        url = json.load(handle)["url"]
+    parts = urlsplit(url)
+    if (parts.scheme != "https" or parts.hostname != "sub.610247.xyz" or parts.port not in (None, 443)
+            or hashlib.sha256(url.encode()).hexdigest() != LEGACY_URL_SHA256):
+        raise ValueError()
+    with open(body_path, encoding="utf-8") as handle:
+        text = handle.read(65537)
+    if len(text) > 65536:
+        raise ValueError()
+    expected, normalized = normalize(text)
+    with open(body_path, "w", encoding="utf-8") as handle:
+        handle.write(normalized)
+    print(expected)
+except (OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError):
+    # 错误中可能包含 URL、节点或密码，不向用户或日志输出原始异常。
     raise SystemExit(1)
-group = next(iter(groups))
-protected_indexes = [index for index, parts in enumerate(matches)
-                     if len(parts) == 3 and parts[0] == "DOMAIN-SUFFIX" and parts[1] in protected]
-direct_indexes = [index for index, parts in enumerate(matches)
-                  if len(parts) >= 3 and parts[2] == "DIRECT"]
-if (len(protected_indexes) != len(protected) or direct_indexes
-        and min(direct_indexes) < max(protected_indexes)
-        or not rules or rules[-1] != "MATCH," + group):
-    raise SystemExit(1)
-print(address)
 PY_LEGACY_SUBSCRIPTION
 }
 
@@ -509,7 +640,7 @@ subscription_fetch() {
     expected=$(awk 'tolower($1)=="x-claude-switcher-egress-ip:" {print $2; exit}' "$headers" | tr -d '\r')
     mode=managed
     if [ -z "$expected" ]; then
-        expected=$(legacy_subscription_expected_ip "$url" "$body") || {
+        expected=$(legacy_subscription_expected_ip "$body") || {
             echo 'FAIL:订阅缺少绑定 IP 标记或不符合旧订阅兼容规则'
             return 1
         }
@@ -535,7 +666,7 @@ with open(tmp, "w", encoding="utf-8") as handle:
 os.chmod(tmp, 0o600)
 PY_SUBSCRIPTION_FETCH
     mv -f "$SUBSCRIPTION_MANIFEST.tmp.$$" "$SUBSCRIPTION_MANIFEST" || { rm -f "$SUBSCRIPTION_MANIFEST.tmp.$$"; echo 'FAIL:无法更新订阅状态'; return 1; }
-    [ "$mode" = legacy-static ] && echo 'INFO:已启用旧静态订阅兼容模式；请尽快迁移到新版 cs_ 订阅地址'
+    [ "$mode" = legacy-static ] && echo 'INFO:已启用旧静态订阅兼容模式；严格分流，手动主备共用住宅出口'
     echo 'OK:订阅已同步'
 }
 

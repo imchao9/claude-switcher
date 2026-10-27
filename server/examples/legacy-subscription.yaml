@@ -1,0 +1,65 @@
+# Synthetic legacy INPUT fixture, deliberately retaining the old routing layout.
+# Non-functional: all credentials and endpoints are examples. The importer
+# rebuilds strict routing and two residential chains from the proxies section.
+proxies:
+- name: 住宅出口
+  type: socks5
+  server: 8.8.8.8
+  port: 1337
+  username: fixture-user
+  password: fixture-password
+  udp: true
+  dialer-proxy: vpn-host1
+- name: vpn-host1
+  type: vless
+  server: reality.example.invalid
+  port: 443
+  uuid: 00000000-0000-4000-8000-000000000000
+  network: tcp
+  tls: true
+  udp: true
+  flow: xtls-rprx-vision
+  servername: reality.example.invalid
+  client-fingerprint: chrome
+  skip-cert-verify: false
+  reality-opts:
+    public-key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    short-id: '12ab'
+    support-x25519mlkem768: true
+- name: vpn-host1-iOS-WS
+  type: vless
+  server: ws.example.invalid
+  port: 443
+  uuid: 00000000-0000-4000-8000-000000000001
+  network: ws
+  tls: true
+  servername: ws.example.invalid
+  skip-cert-verify: false
+  udp: false
+  alpn:
+  - http/1.1
+  ws-opts:
+    path: /example-ws
+    headers:
+      Host: origin.example.invalid
+mixed-port: 1080
+proxy-groups:
+- name: VPN-HOST1
+  type: select
+  proxies:
+  - 住宅出口
+  - vpn-host1
+  - vpn-host1-iOS-WS
+rules:
+- DOMAIN-SUFFIX,claude.ai,住宅出口
+- DOMAIN-SUFFIX,anthropic.com,住宅出口
+- DOMAIN-SUFFIX,claude.com,住宅出口
+- DOMAIN-SUFFIX,clau.de,住宅出口
+- DOMAIN-SUFFIX,claudeusercontent.com,住宅出口
+- GEOIP,CN,DIRECT
+- MATCH,VPN-HOST1
+dns:
+  enable: true
+  nameserver:
+  - https://1.1.1.1/dns-query
+  direct-nameserver: system

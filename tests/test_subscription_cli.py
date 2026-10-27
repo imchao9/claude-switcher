@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -169,69 +170,133 @@ printf 'proxies:\\n  - name: user\\n    type: vless\\n    server: 198.51.100.10\
         self.assertEqual(list((self.home / ".claude-switcher").glob("subscription.headers.*")), [])
         self.assertEqual(list((self.home / ".claude-switcher").glob("subscription.body.*")), [])
 
-    def test_legacy_static_subscription_uses_trusted_compatibility_shape(self):
+    def legacy_fixture(self, *, trusted=True, text=None):
         url = "https://sub.610247.xyz/sub/" + "a" * 43 + "/vpn-host1.yaml"
+        # 生产只允许用户指定的 URL 摘要；隔离副本允许合成令牌。
+        self.installed.write_text(self.installed.read_text().replace(
+            "30692aa2b68b8561cec027dff22af7c1d8fd010e6cc687c89ed2be395d42a0c1",
+            hashlib.sha256(url.encode()).hexdigest()))
+        if not trusted:
+            url = url.replace("sub.610247.xyz", "other.example")
         self.assertEqual(self.run_cli("subscription", "set", stdin=url + "\n").returncode, 0)
-        pgrep = self.bin / "pgrep"
-        pgrep.write_text("#!/bin/sh\nexit 0\n")
-        pgrep.chmod(0o755)
-        ifconfig = self.bin / "ifconfig"
-        ifconfig.write_text("#!/bin/sh\nprintf 'inet 198.18.0.2\\n'\n")
-        ifconfig.chmod(0o755)
+        for name, contents in (("pgrep", "exit 0"), ("ifconfig", "printf 'inet 198.18.0.2\\n'")):
+            tool = self.bin / name
+            tool.write_text("#!/bin/sh\n" + contents + "\n")
+            tool.chmod(0o755)
+        fixture = self.root / "legacy.yaml"
+        fixture.write_text(text if text is not None else (ROOT / "server/examples/legacy-subscription.yaml").read_text())
         curl = self.bin / "curl"
         curl.write_text("""#!/bin/sh
-headers= body=
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -D) headers=$2; shift 2 ;;
-    -o) body=$2; shift 2 ;;
+    -D) h=$2; shift 2 ;;
+    -o) b=$2; shift 2 ;;
     *) shift ;;
   esac
 done
-: > "$headers"
-cat > "$body" <<'YAML'
-proxies:
-  - name: 住宅出口
-    type: socks5
-    server: 8.8.8.8
-    port: 1337
-  - name: vpn-host1
-    type: vless
-    server: 203.0.113.10
-    port: 443
-rules:
-  - DOMAIN-SUFFIX,claude.ai,VPN-HOST1
-  - DOMAIN-SUFFIX,anthropic.com,VPN-HOST1
-  - DOMAIN-SUFFIX,claude.com,VPN-HOST1
-  - DOMAIN-SUFFIX,clau.de,VPN-HOST1
-  - DOMAIN-SUFFIX,claudeusercontent.com,VPN-HOST1
-  - GEOIP,CN,DIRECT
-  - MATCH,VPN-HOST1
-YAML
-""")
+: > "$h"
+cp '__FIXTURE__' "$b"
+""".replace("__FIXTURE__", str(fixture)))
         curl.chmod(0o755)
+        return fixture
+
+    def normalized_legacy(self):
+        # 输出的顶层字段使用 JSON flow 值，无需为客户端引入 YAML 依赖。
+        text = (self.home / ".claude-switcher/subscription.yaml").read_text()
+        document = {line.split(": ", 1)[0]: json.loads(line.split(": ", 1)[1])
+                    for line in text.splitlines() if line and line[0] != " " and ": " in line}
+        document["proxies"] = [json.loads(line[4:]) for line in text.splitlines() if line.startswith("  - ")]
+        return document
+
+    def test_legacy_static_subscription_normalizes_actual_old_layout(self):
+        self.legacy_fixture()
         result = self.run_cli("subscription", "fetch")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("旧静态订阅兼容模式", result.stdout)
         manifest = json.loads((self.home / ".claude-switcher/subscription.json").read_text())
         self.assertEqual(manifest["expected_ip"], "8.8.8.8")
         self.assertEqual(manifest["subscription_mode"], "legacy-static")
+        doc = self.normalized_legacy()
+        group = doc["proxy-groups"][0]
+        self.assertEqual(group, {"name": "CLAUDE-SWITCHER", "type": "select",
+                                "proxies": ["旧订阅住宅-Reality", "旧订阅住宅-WS"]})
+        nodes = {node["name"]: node for node in doc["proxies"]}
+        for name, entry in zip(group["proxies"], ("vpn-host1", "vpn-host1-iOS-WS")):
+            self.assertEqual(nodes[name]["server"], "8.8.8.8")
+            self.assertEqual(nodes[name]["dialer-proxy"], entry)
+            self.assertEqual(nodes[name]["password"], "fixture-password")
+        self.assertTrue(all(n["udp"] is False for n in nodes.values()))
+        self.assertEqual(doc["rules"][0], "NETWORK,udp,REJECT")
+        self.assertEqual(len(doc["rules"]), 7)
+        self.assertEqual(doc["rules"][-1], "MATCH,CLAUDE-SWITCHER")
+        self.assertFalse(any("DIRECT" in rule for rule in doc["rules"]))
+        self.assertEqual(doc["dns"]["nameserver"], ["https://1.1.1.1/dns-query#CLAUDE-SWITCHER"])
+        self.assertNotIn("fallback", doc["dns"])
+        self.assertNotIn("direct-nameserver", doc["dns"])
+        self.assertNotIn("fixture-password", result.stdout + result.stderr)
+        self.assertEqual(stat.S_IMODE((self.home / ".claude-switcher/subscription.yaml").stat().st_mode), 0o600)
 
-    def test_legacy_compatibility_does_not_accept_untrusted_host(self):
-        url = "https://other.example/sub/" + "a" * 43 + "/vpn-host1.yaml"
-        self.assertEqual(self.run_cli("subscription", "set", stdin=url + "\n").returncode, 0)
-        pgrep = self.bin / "pgrep"
-        pgrep.write_text("#!/bin/sh\nexit 0\n")
-        pgrep.chmod(0o755)
-        ifconfig = self.bin / "ifconfig"
-        ifconfig.write_text("#!/bin/sh\nprintf 'inet 198.18.0.2\\n'\n")
-        ifconfig.chmod(0o755)
-        curl = self.bin / "curl"
-        curl.write_text("#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do case \"$1\" in -D) h=$2; shift 2;; -o) b=$2; shift 2;; *) shift;; esac; done; : > \"$h\"; printf 'proxies:\\n' > \"$b\"\n")
-        curl.chmod(0o755)
+    def test_legacy_compatibility_accepts_indented_lists_and_quoted_secrets(self):
+        fixture = self.legacy_fixture()
+        text = fixture.read_text()
+        start = text.index("proxies:\n") + len("proxies:\n")
+        end = text.index("mixed-port:")
+        text = text[:start] + "\n".join("  " + line for line in text[start:end].splitlines()) + "\n" + text[end:]
+        text = text.replace("password: fixture-password", "password: 'fixture: # password''value'")
+        fixture.write_text(text)
         result = self.run_cli("subscription", "fetch")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("不符合旧订阅兼容规则", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        doc = self.normalized_legacy()
+        self.assertEqual(doc["proxies"][-1]["password"], "fixture: # password'value")
+
+    def test_legacy_compatibility_rejects_duplicate_top_level_proxies(self):
+        fixture = self.legacy_fixture()
+        fixture.write_text(fixture.read_text().replace("proxies:", "proxies: []\nproxies:", 1))
+        self.assertEqual(self.run_cli("subscription", "fetch").returncode, 1)
+        self.assertFalse((self.home / ".claude-switcher/subscription.yaml").exists())
+
+    def test_legacy_compatibility_rejects_other_urls(self):
+        self.legacy_fixture()
+        urls = ["https://other.example/sub/" + "a" * 43 + "/vpn-host1.yaml",
+                "https://sub.610247.xyz/sub/" + "b" * 43 + "/vpn-host1.yaml",
+                "https://sub.610247.xyz/sub/" + "a" * 43 + "/vpn-host1.yaml?format=clash"]
+        for url in urls:
+            with self.subTest(url_kind=url.split("/")[2]):
+                self.run_cli("subscription", "set", stdin=url + "\n")
+                result = self.run_cli("subscription", "fetch")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("不符合旧订阅兼容规则", result.stdout)
+                self.assertFalse((self.home / ".claude-switcher/subscription.yaml").exists())
+
+    def test_legacy_compatibility_fails_closed_on_unsupported_nodes(self):
+        fixture = self.legacy_fixture()
+        original = fixture.read_text()
+        changes = [
+            ("server: 8.8.8.8", "server: 127.0.0.1"),
+            ("type: socks5", "type: direct"),
+            ("dialer-proxy: vpn-host1", "dialer-proxy: DIRECT"),
+            ("skip-cert-verify: false", "skip-cert-verify: true"),
+            ("tls: true", "tls: false"),
+            ("  password: fixture-password", "  password: fixture-password\n  password: other"),
+            ("  password: fixture-password", "  password: *credential"),
+            ("  password: fixture-password", "  password: !tag credential"),
+            ("  type: socks5", "  type: socks5\n  unknown-option: true"),
+            ("proxies:", "proxies: []\nproxies:"),
+            ("name: vpn-host1-iOS-WS", "name: vpn-host1"),
+        ]
+        for old, new in changes:
+            with self.subTest(field=old.split(":")[0].strip()):
+                fixture.write_text(original.replace(old, new))
+                result = self.run_cli("subscription", "fetch")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertFalse((self.home / ".claude-switcher/subscription.yaml").exists())
+                self.assertNotIn("fixture-password", result.stdout + result.stderr)
+        fixture.write_text(original)
+        self.assertEqual(self.run_cli("subscription", "fetch").returncode, 0)
+        saved = (self.home / ".claude-switcher/subscription.yaml").read_bytes()
+        fixture.write_text(original.replace("server: 8.8.8.8", "server: 127.0.0.1"))
+        self.assertEqual(self.run_cli("subscription", "fetch").returncode, 1)
+        self.assertEqual((self.home / ".claude-switcher/subscription.yaml").read_bytes(), saved)
 
     def test_status_is_sanitized_and_clear_removes_local_secret(self):
         url = "https://sub.example.com/s/cs_private-token-123456"
