@@ -32,6 +32,7 @@ class SnapshotSafetyTests(unittest.TestCase):
         TRASH.mkdir(exist_ok=True)
         cls.archive = function_source("archive_current")
         cls.switch = function_source("switch_to")
+        cls.switch += "\n" + function_source("launch_claude")
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(
@@ -66,6 +67,9 @@ copy_tree() {
     mkdir -p "$2" && cp -R "$1/." "$2/"
 }
 quit_claude() { return 0; }
+timezone_valid() { return 0; }
+TZ_TARGET=America/New_York
+launch_gate() { return 0; }
 open() { printf 'called' > "$FIXTURE/launched"; }
 mv() {
     if [ "$INJECT" = "first_move_error" ] && [ "$1" = "$DATA" ]; then
@@ -163,11 +167,12 @@ mv() {
     def test_switch_does_not_advance_if_archive_fails(self):
         (self.base / "current").write_text("A")
         code = (
-            "archive_current() { return 23; }\n"
+            'archive_current() { printf "called" > "$FIXTURE/archive-attempted"; return 23; }\n'
             + self.switch
             + "\nswitch_to B"
         )
         run = self.run_shell(code)
+        self.assertTrue((self.fixture / "archive-attempted").exists())
         self.assertNotEqual(run.returncode, 0)
         self.assert_data()
         self.assertEqual((self.base / "current").read_text(), "A")
@@ -175,11 +180,12 @@ mv() {
 
     def test_first_enrollment_does_not_advance_if_archive_fails(self):
         code = (
-            "archive_current() { return 23; }\n"
+            'archive_current() { printf "called" > "$FIXTURE/archive-attempted"; return 23; }\n'
             + self.switch
             + "\nswitch_to B"
         )
         run = self.run_shell(code)
+        self.assertTrue((self.fixture / "archive-attempted").exists())
         self.assertNotEqual(run.returncode, 0)
         self.assert_data()
         self.assertFalse((self.base / "current").exists())

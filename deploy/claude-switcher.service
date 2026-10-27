@@ -1,0 +1,31 @@
+[Unit]
+Description=Claude Switcher subscription management
+After=network.target
+
+[Service]
+Type=simple
+User=claude-switcher
+Group=claude-switcher
+WorkingDirectory=/opt/claude-switcher/current
+ExecStart=/usr/bin/python3 -m server --db /var/lib/claude-switcher/subscriptions.db --host 127.0.0.1 --port 8787 --base-url https://sub.610247.xyz --admin-auth-file /etc/claude-switcher/admin-auth.json --integration-status-file /var/lib/claude-switcher-sync-status/status.json
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/claude-switcher
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

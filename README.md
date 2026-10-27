@@ -31,7 +31,7 @@ AI 服务平台的风控已经从"看 IP"进化到**全维度环境画像**：�
 
 ### 1. Block-on-Fail 环境审计引擎
 
-每次启动前强制执行 14 项环境指纹审计，**任一指标不达标，应用物理上不会被拉起**：
+每次启动前执行 14 项检查。出现失败项时拒绝启动；警告项允许继续，不能作为相关能力已经验证的证明。
 
 | # | 检查项 | 防什么 |
 |---|---|---|
@@ -39,7 +39,7 @@ AI 服务平台的风控已经从"看 IP"进化到**全维度环境画像**：�
 | 02 | TUN 网卡 | 系统代理开着但流量没被接管 |
 | 03 | 出口 IP | 出口国家/地区异常 |
 | 04 | IP 一致性 | 出口 IP 突变（跳节点是风控信号） |
-| 05 | 时区 | 系统时区与 IP Geo-location 冲突 |
+| 05 | 时区 | 校验桌面启动的进程 TZ 目标，实际客户端采用情况显示未验证 |
 | 06 | 地区 Locale | 系统区域设置不符 |
 | 07 | IPv6 | 双栈旁路直连（最隐蔽的泄漏通道之一） |
 | 08 | DNS 隧道 | Fake-IP 校验，杜绝明文 DNS 泄漏 |
@@ -56,7 +56,9 @@ AI 服务平台的风控已经从"看 IP"进化到**全维度环境画像**：�
 
 不依赖浏览器内核（headless Chrome 的 ICE 子系统在无人值守场景下根本不工作——我们踩过这个坑），直接用 `socket` + `struct` 手工构造 RFC 5389 Binding Request，解析 XOR-MAPPED-ADDRESS。
 
-真正的创新在**交叉验证拓扑**：探测列表同时包含全球节点（Google/Cloudflare）与国内骨干节点——走隧道时应回传代理出口 IP，裸连时国内节点必然秒回并当场抓获真实 IP。两种状态可区分、零误报、不依赖"恰好不通"。
+探测列表同时包含全球节点（Google/Cloudflare）与国内节点。macOS 检查仅在探针执行成功、返回有效地址且全部与有效参考出口一致时通过。无响应、超时、空结果、异常输出或缺少参考出口均视为未确认，阻止桌面启动；`RESULT:NONE` 不能证明 UDP 已被阻断。修复流程只在确认地址不一致时尝试重载 TUN，并重新获取参考出口后复测。
+
+Clash Verge 的 STUN/TURN 配置检查要求生成的 `clash-verge.yaml` 包含指向目标代理组的 3478、5349、19302 三个端口规则。待合并的 `Merge.yaml` 不作为通过依据，可能遮蔽这些规则的前置配置也不通过。此检查只确认配置文件，不证明代理内核当前加载状态或实际流量路径。
 
 ### 3. Fail-Closed Kill-Switch
 
@@ -68,9 +70,11 @@ AI 服务平台的风控已经从"看 IP"进化到**全维度环境画像**：�
 
 切换开销被压到"零拷贝"级别：归档是**同卷移动**（rename，瞬时完成），载入走 **APFS clonefile / reflink 的写时复制（COW）**——只有日后被修改的数据块才会真正复制。macOS 不支持 clonefile 时自动回退 `ditto` 全量复制，Linux 回退普通 `cp -a`（可用 `CLAUDE_SWITCHER_NO_CLONE=1` 强制走回退路径）。
 
-### 5. 配置漂移自愈（Watchdog）
+### 5. 系统时区由用户管理
 
-软件更新会静默重置你的安全配置（我们的生产环境里，TUN 开关被代理客户端更新重置了 4 次，系统时区被改回 8 次）。Watchdog 周期巡检 + 基线回滚 + 全程留痕，配置漂移从"事故"降级为"日志里的一行记录"。
+macOS 安装器、修复及换地区命令不设置系统时区，也不注册时区看门狗。升级安装会停用旧时区服务。用户态更新只提示旧服务的迁移，不会自行提权。
+
+桌面切换器给新启动的 Claude 传入 `TZ_TARGET` 对应的 `TZ`，并先等待旧 Claude 完全退出。该环境值不保证 Electron 渲染进程或原生组件全部采用相同时区，因此时区项保持提醒。系统时区由用户在 macOS 设置中管理，不因与目标不同而阻止启动。
 
 ### 6. Pinned Routing 置顶路由
 
@@ -82,7 +86,6 @@ AI 服务平台的风控已经从"看 IP"进化到**全维度环境画像**：�
 
 ```
 2026-10-07 00:31:12  代理离线(内核或TUN丢失),已自动关闭 Claude   ← Kill-Switch 真实拦截
-2026-10-04 12:55:26  时区异常: [Asia/Shanghai] 已自动恢复        ← Watchdog 第 8 次拦截漂移
 ```
 
 ## 界面
@@ -103,28 +106,125 @@ AI 服务平台的风控已经从"看 IP"进化到**全维度环境画像**：�
 git clone https://github.com/YOURSJEYO/claude-switcher.git
 ```
 
+## 安装 Antify 与独立 Code 检测窗口
+
+macOS 14 或更高版本可双击 `installer/安装Antify检测版.command`。也可以运行：
+
+```bash
+bash installer/安装.command --code-antify
+```
+
+安装器从 [Antify 官方发布地址](https://r2.antifyapp.com/releases/latest/Antify.dmg) 下载应用，校验 Bundle ID、开发者 Team ID、代码签名和 Gatekeeper。已安装且验证通过的 0.0.82 或更新版本会保留。旧版正在运行时安装器停止，请先用 Antify 内置更新或退出后重试。
+
+安装器生成独立的 `~/Desktop/ClaudeCode环境检测.app`，检测工具放在 `~/.claude-switcher/code-tools/`。它不依赖 Claude 桌面版，也不要求先安装 CLI。缺少 CLI 时，窗口会明确显示检测失败。它不替换已有桌面切换器、不注册后台服务、不修改系统时区、DNS、IPv6、Clash TUN 或代理配置。进程时区可以通过 Claude Code 的 `TZ` 单独配置。
+
+运行 `bash installer/安装.command --code-antify --dry-run` 可预演。预演只检查系统版本和源码完整性，不下载、编译、安装或启动应用。
+
+安装完成后，在 Antify 中完成系统扩展和内容过滤器授权，再按[命令行规则指南](https://antifyapp.com/en/guides/command-line-rules/)配置 Claude Code。规则只影响新连接，修改规则后应重启相应进程。按 [Kill Switch 指南](https://antifyapp.com/en/guides/kill-switch/)启用并验证断线保护。不要把扩展已批准、应用已安装或 GUI 里的待核验状态当成实际路由和防泄漏通过。DNS 与扩展崩溃窗口需要另外验证。安装器和 Antify 检测不会访问 Claude 服务域名。
+
+窗口可选择 `Antify 诊断` 或原有的 `TUN 受检`。Antify 诊断检查 CLI、配置目录、官方安装签名、扩展授权状态，并明确保留实际路由与保护两项待核验。它不会用当前终端的全局 curl 出口推断 Claude 的分应用路由。账号 A、B 的目录隔离不等于已经配置不同代理，Antify 规则需自行核实。
+
+```bash
+bash core/claude-switch.sh code check A --route antify --json
+```
+
+Antify 输出独立的 `kind=antify_diagnostics` 报告，`launch_supported=false`。`code run --route antify` 始终拒绝启动。原有 `code run` 仍使用 TUN 检查，不受 Antify 诊断结果授权。
+
+重新运行此专用安装器可更新独立检测窗口。原桌面切换器的更新器和卸载器不管理该窗口，也不会删除 Antify。安装不需要管理员命令；当前用户无法写入 `/Applications` 时会停止并提示权限问题。
+
+## Claude Code（macOS CLI）
+
+检测窗口在确认缺少 CLI 后提供“安装 Claude Code（官方）”入口。它调用官方原生安装器，不要求预先安装 Node.js。安装是用户主动操作，日常检查和 Antify 检测版安装器不会自动下载 CLI。已有可执行的 `claude` 会保留，不自动覆盖或升级。
+
+也可在仓库中显式运行：
+
+```bash
+bash core/claude-switch.sh code install --json
+```
+
+安装需要访问官方安装与下载地址，使用当前网络环境，不会自动调整代理或 TUN。安装后检查可执行文件及版本，再重新检测环境；安装成功不代表已登录、路由已验证或允许 Antify 受检启动。官方原生安装的更新行为由 Claude Code 管理，详见[官方安装说明](https://code.claude.com/docs/en/setup)。
+
+取消、超时或失败时会结束本次下载/安装进程组，但官方安装器可能已写入部分文件，不能当作完整回滚。错误信息不展示安装器原始日志。CLI 查找会补充 `~/.local/bin/claude`，无需为检测窗口改写 shell 启动配置。
+
+
+可在受检启动时显式指定进程时区：
+
+```bash
+bash core/claude-switch.sh code run A --timezone America/Chicago --
+```
+
+`--timezone` 只为本次子进程设置 `TZ`。省略时保留已有环境及 Claude Code 自身配置，不自动套用桌面版 `TZ_TARGET`。参数需为有效命名时区。传入 `TZ` 不等于验证客户端所有组件的实际时区；Antify 模式仍仅诊断，不能通过该入口启动。
+
+
+界面可切换到「Claude Code」，分别检测默认、A、B 配置。环境检查只读；安装 CLI 需主动点击安装入口。页面不启动会话、不登录或切换账号，也不修改系统时区。六项结果区分通过、提醒、失败和未执行；未创建的账号目录及未配置的订阅绑定会显示提醒。检测沿用当前入口的 TUN 要求，探针出口不代表 Claude 的实际请求路径；DNS、断线阻断、进程时区和登录状态均未验证。终端 alias 不会自动传入界面。
+
+界面通过 `code check [default|A|B] --json` 读取版本化结果，需同时更新核心脚本及 `claude-code.py`。缺少文件或版本不匹配时会显示错误，不会认定检测通过。
+
+Claude Code 可使用受检启动入口，并为 claude.ai 账号 A、B 保留独立登录、会话历史和设置。这个入口与桌面版的账号快照互不影响，也不会替换系统中的 `claude` 命令。
+
+```bash
+# 只读检查，不创建账号目录或启动 Claude
+bash core/claude-switch.sh code check A
+
+# 默认配置照常使用，不迁移 ~/.claude 或已有 CLAUDE_CONFIG_DIR
+bash core/claude-switch.sh code run --
+
+# A、B 首次进入时，分别使用 Claude Code 自己的登录流程
+bash core/claude-switch.sh code run A --
+bash core/claude-switch.sh code run B --
+# 之后再运行 A，继续使用 A 的登录态
+bash core/claude-switch.sh code run A --
+
+# 参数、管道、当前工作目录和退出状态透传给 Claude Code
+printf '解释这段代码' | bash core/claude-switch.sh code run A -- -p
+```
+
+从只有单脚本更新器的旧版本升级时，第一次 `update` 只会带回新版核心脚本，需要再执行一次 `claude-switch.sh update` 才会安装 helper；也可以重跑安装器。部分旧更新器在打印“更新完成”后还会因替换运行中的脚本而报尾部语法错误，这种情况也需要重新执行一次 `update`。缺少 helper 时 Code 入口拒绝启动并显示这个迁移指引。
+
+安装器会分发 `core/claude-code.py` 到 `~/.claude-switcher/claude-code.py`。安装后将示例中的 `bash core/claude-switch.sh` 换成 `~/.local/bin/claude-switch.sh` 即可。仓库运行使用仓库脚本顶部的 `PROXY_MODE`、`COUNTRY_TARGET`；安装版本使用安装时保存的配置。Code 入口要求已安装 Claude Code、python3 和可用代理/TUN，不依赖桌面 App 或桌面保镖服务。完整安装器仍有桌面版的安装前置条件。
+
+A、B 使用 [Claude Code 官方支持的 CLAUDE_CONFIG_DIR](https://code.claude.com/docs/en/authentication#log-in-with-multiple-accounts)，目录分别为 `~/.claude-switcher/code/A` 和 `B`，权限为 700。每个目录从空配置开始，不复制默认登录资料、Keychain、设置或代理配置。官方说明此方式支持独立 claude.ai 登录，不支持不带 API key 的 Console 登录。这里不管理 Console、Bedrock、Vertex 或第三方 API key 的账号切换；指定 A/B 时会拒绝继承的认证、提供商及 `CLAUDE_CONFIG_DIR` 环境变量，避免误用同一身份。默认入口保留这些环境变量。
+
+启动前检查 CLI、账号目录、代理内核、fake-IP TUN、Cloudflare trace 的出口国家及已配置订阅的绑定 IP。trace 请求失败、超时、缺少或重复国家/IP 字段、国家不匹配，以及已存在但损坏或未同步绑定 IP 的订阅文件，均阻止启动。`code check` 不写账号存档、IP 历史或检查日志。Code 检查不包含桌面版的时区、地区、语言、IPv6、DNS、STUN、ASN、桌面守护服务或账号认证状态。
+
+运行期间，每次检查完成后等待 5 秒，再检查代理、TUN、国家及订阅绑定；单次检查最多 15 秒，终止宽限期 2 秒。异常只终止本次启动的进程组，不扫描或终止其他 `claude` 会话。终端输入、Ctrl-C、Ctrl-Z/前台恢复、窗口尺寸变化和退出状态保留；健康检查主动阻断返回 125。程序自行脱离进程组的后台任务不在此进程组保护范围内。
+
+此机制是有检测间隔的进程终止保护，不是零泄漏防火墙。Cloudflare 探测不能证明 Claude Code 的真实请求路径；命令行参数、独立账号目录中的设置、项目设置及 managed settings 仍可能改变认证或网络路由。A/B 不继承默认 `settings.json` 的代理设置，应自行在各自配置中确认代理配置，或者确认系统 TUN 覆盖实际流量。直接运行 `claude`、IDE 扩展和其他入口不受本功能保护，也没有被自动改写。卸载保留 A/B 配置目录与登录资料，自动更新对 helper 一并校验、备份和回滚。
+
 ## 地区自适应
 
-不再锁死美国：安装程序按当前出口 IP 的国家自动锁定**目标国家 + 时区 + 地区格式**三件套（出口是 CN 会直接拒装，逼你先挂好代理）。之后换了其他国家的节点，不用重装，一条命令重新适配：
+安装程序按当前出口记录目标国家、桌面进程时区和地区格式。系统时区由用户管理。切换国家节点后，可重新探测目标：
 
 ```bash
 ~/.local/bin/claude-switch.sh set-region
-# 自动探测出口国家 → 改写自身配置 → 设地区格式 → 弹一次授权锁时区 → 同步看门狗
+# 探测出口国家，更新目标配置和地区格式；不改系统时区
 # 输出: OK:region=JP tz=Asia/Tokyo locale=ja_JP
 ```
 
-14 项检查里的「出口 IP / 时区 / 地区」全部按新目标判定，界面无需任何改动。
+出口国家和地区按新目标判定。时区项只校验启动目标并提示实际采用情况未验证，不比较系统时区。
+
+安装器会先在临时目录构建并验证 App，成功后才写入安装文件。编译时会显式传入 macOS SDK，兼容 PATH 中的独立 Swift 工具链（如 Homebrew Swift）。如果 SDK 或工具链损坏，先处理编译错误，不要删除现有 App 或账号存档。
+
+安装过程遇到文件复制、管理员授权或服务注册失败会立即停止；只有 14 个安检项目完整返回、其余 13 项均为 `ok`，且时区项为合法启动目标的预期提醒，才会显示「安装完成」。时区实际采用情况继续显示未验证；其他警告、红项或结果不完整均不算安装验收通过。设置 `DRYRUN=1` 时仅在临时目录构建 App，不修改安装态、代理配置或系统设置。
 
 ## 不会配置？交给你的 AI
 
 仓库根目录的 [`AGENTS.md`](AGENTS.md) 是一份完整的 **Agent 交接提示词**：把它直接粘贴给你的本地模型（Kimi Code / Cursor / Claude Code 等），它会按文档自动完成环境检查、安装、配置与验收。里面还附了我们实战踩过的全部坑的排障手册。
 
+## 云端订阅与独立出口 IP
+
+仓库包含标准库服务端 MVP，位于 [`server/`](server/)。管理员维护多台共享云服务器，每台可绑定多个家庭代理 IP。每个用户独占一个家庭 IP，并通过自己的订阅连接所属云入口。服务端按云服务器导出 Xray 用户及出口路由配置，不包含支付或计费。配置需要管理员应用到云端。管理页和启动命令见 [`server/README.md`](server/README.md)。
+
+本地 `claude-switch.sh` 支持 `subscription set|fetch|status|check|install|ports|clear`。同步前要求代理和 TUN 在线，当前出口 IP 与订阅绑定 IP 不一致时保持 Fail-Closed。`subscription ports --json` 只读核对运行内核的实际监听端口；订阅模板的 7890 不代表本机端口，不会替用户改成 1080。
+
+托管订阅支持按服务器显式配置 Reality ML-KEM 兼容选项，并可增加同一住宅出口的受管 WS+TLS 备用节点。公开订阅默认使用严格路由。Claude 和 Anthropic 相关域名以及其他业务流量都只进入受管节点组，代理不可用时直接失败，不生成业务 `DIRECT` 或 DNS fallback。Clash 配置包含 loopback fake-IP DNS，应用 DoH 经所选节点，节点域名启动解析使用单独的直连 DoH。需要日常国内分流时，可在订阅地址显式增加 `routing=domestic-direct`，AI 规则仍置前，未知参数会被拒绝。配置生成不等于线路或 DNS 防泄漏验收；逐节点开发验收入口、同步器双入口配置和剩余边界见 [服务端说明](server/README.md#订阅兼容与可选-ws-备用)。
+
 ## 使用
 
 1. 双击桌面「Claude切换器」→ 等待 14 项检查
-2. 全绿 → 选账号启动；有红项 → 「一键修复」自动处理
+2. 无失败项 → 选账号启动；进程时区未验证保持提醒。有红项时查看原因或运行「一键修复」，系统时区仍由用户设置
 3. B 账号首次使用登录一次，以后 A/B 随切随用、互不干扰
-4. 换了其他国家的节点 → 跑一次 `~/.local/bin/claude-switch.sh set-region`，国家/时区/地区格式一键重新锁定
+4. 换了其他国家的节点 → 跑一次 `~/.local/bin/claude-switch.sh set-region`，更新目标国家、桌面进程时区及地区格式，保留系统时区
 
 ## Web 版环境检测（零安装）
 
@@ -217,6 +317,7 @@ bash core/claude-switch.sh diagnose-proxy --proxy http://127.0.0.1:18080
 ├── windows/                # Windows 版(PowerShell 核心 + WPF 界面, Beta)
 ├── linux/                  # Linux 版(bash 核心 + systemd 保镖 + 终端菜单, Beta)
 ├── docs/                   # Web 版环境检测页(index.html 等, GitHub Pages 从这里发布) + 项目文档
+├── server/                 # 用户/IP 绑定、订阅生成与管理页(标准库 MVP)
 ├── daemons/                # Kill-Switch / Watchdog / 自动更新 launchd 模板
 ├── installer/              # 双击安装/卸载
 ├── scripts/gen-sums.sh     # 重新生成 SHA256SUMS(改动 core/daemons/installer 后必跑)
