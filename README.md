@@ -232,11 +232,11 @@ A、B 使用 [Claude Code 官方支持的 CLAUDE_CONFIG_DIR](https://code.claude
 
 ## 云端订阅与独立出口 IP
 
-仓库包含标准库服务端 MVP，位于 [`server/`](server/)。管理员维护多台共享云服务器，每台可绑定多个家庭代理 IP。每个用户独占一个家庭 IP，并通过自己的订阅连接所属云入口。服务端按云服务器导出 Xray 用户及出口路由配置，不包含支付或计费。配置需要管理员应用到云端。管理页和启动命令见 [`server/README.md`](server/README.md)。
+仓库包含基于 Python 标准库的订阅后台，位于 [`server/`](server/)。管理员维护用户、共享云服务器、住宅代理 IP 及绑定关系，每个用户独占一个住宅出口。后台生成用户订阅；独立同步器读取绑定，通过本机 3X-UI API 更新受管身份、出口和路由，Xray 执行实际转发。已配置同步的服务器自动应用变更，其他服务器仍需单独对接或人工应用。项目不包含支付或计费。管理页、启动命令和组件分工见 [`server/README.md`](server/README.md#与-3x-ui-的分工与同步)。
 
-本地 `claude-switch.sh` 支持 `subscription set|fetch|status|check|install|ports|clear`。同步前要求代理和 TUN 在线，当前出口 IP 与订阅绑定 IP 不一致时保持 Fail-Closed。`subscription ports --json` 只读核对运行内核的实际监听端口；订阅模板的 7890 不代表本机端口，不会替用户改成 1080。
+本地 `claude-switch.sh` 支持 `subscription set|fetch|status|check|install|ports|clear`。同步前要求代理和 TUN 在线，当前出口 IP 与订阅绑定 IP 不一致时保持 Fail-Closed。`subscription ports --json` 只读核对运行内核的实际监听端口；订阅模板默认 `mixed-port: 7897`，后台 HTTP 默认监听 8787；模板端口不代表客户端内核的实际端口，也不会自动修改本机客户端设置。
 
-托管订阅支持按服务器显式配置 Reality ML-KEM 兼容选项，并可增加同一住宅出口的受管 WS+TLS 备用节点。公开订阅默认使用严格路由。Claude 和 Anthropic 相关域名以及其他业务流量都只进入受管节点组，代理不可用时直接失败，不生成业务 `DIRECT` 或 DNS fallback。Clash 配置包含 loopback fake-IP DNS，应用 DoH 经所选节点，节点域名启动解析使用单独的直连 DoH。需要日常国内分流时，可在订阅地址显式增加 `routing=domestic-direct`，AI 规则仍置前，未知参数会被拒绝。配置生成不等于线路或 DNS 防泄漏验收；逐节点开发验收入口、同步器双入口配置和剩余边界见 [服务端说明](server/README.md#订阅兼容与可选-ws-备用)。
+托管订阅统一交付 VLESS + WS + TLS，每位用户保留独立 WS 身份、订阅令牌和住宅出口绑定，同时提供 Clash YAML 与 Shadowrocket Base64 两种地址。公开订阅默认使用严格路由，代理不可用时业务请求失败；业务 DNS 经住宅节点，入口域名使用单独的直连 DoH 引导解析。需要国内分流时显式增加 `routing=domestic-direct`。历史 Reality 配置仅为迁移保留；切换 WS 后，受管旧身份由同步器禁用并保留拦截规则。协议、同步迁移及验收边界见 [服务端说明](server/README.md#ws-唯一入口与订阅验收)。
 
 ## 使用
 

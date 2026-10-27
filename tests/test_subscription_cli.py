@@ -236,6 +236,24 @@ cp '__FIXTURE__' "$b"
         self.assertNotIn("fixture-password", result.stdout + result.stderr)
         self.assertEqual(stat.S_IMODE((self.home / ".claude-switcher/subscription.yaml").stat().st_mode), 0o600)
 
+    def test_ws_only_legacy_subscription_keeps_residential_chain(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML is required for the synthetic legacy input")
+        document = yaml.safe_load((ROOT / 'server/examples/legacy-subscription.yaml').read_text())
+        document['proxies'] = [node for node in document['proxies'] if node['name'] != 'vpn-host1']
+        document['proxies'][0]['dialer-proxy'] = 'vpn-host1-iOS-WS'
+        self.legacy_fixture(text=yaml.safe_dump(document, allow_unicode=True, sort_keys=False))
+        result = self.run_cli('subscription', 'fetch')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        normalized = self.normalized_legacy()
+        nodes = {node['name']: node for node in normalized['proxies']}
+        self.assertEqual(set(nodes), {'vpn-host1-iOS-WS', '旧订阅住宅-WS'})
+        self.assertEqual(nodes['旧订阅住宅-WS']['dialer-proxy'], 'vpn-host1-iOS-WS')
+        self.assertEqual(normalized['proxy-groups'][0]['proxies'], ['旧订阅住宅-WS'])
+        self.assertNotIn('reality-opts', str(normalized))
+
     def test_legacy_compatibility_accepts_indented_lists_and_quoted_secrets(self):
         fixture = self.legacy_fixture()
         text = fixture.read_text()

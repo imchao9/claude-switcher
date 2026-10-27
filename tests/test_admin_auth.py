@@ -10,6 +10,8 @@ import tempfile
 import threading
 import unittest
 
+from http.cookies import SimpleCookie
+
 from server.admin_auth import AdminAuth, LoginError, SESSION_TTL, hash_admin_password, load_admin_auth_file
 from server.subscription_server import create_server
 
@@ -39,17 +41,19 @@ class AdminAuthTests(unittest.TestCase):
             server.store.close()
         self.temp.cleanup()
 
-    def request(self, method, path, body=None, token=None, server=None, raw=None):
+    def request(self, method, path, body=None, token=None, server=None, raw=None, headers=None, include_headers=False):
         conn = http.client.HTTPConnection(*(server or self.server).server_address, timeout=5)
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", **(headers or {})}
         if token:
             headers["Authorization"] = "Bearer " + token
         encoded = raw if raw is not None else None if body is None else json.dumps(body).encode()
         conn.request(method, path, encoded, headers)
         response = conn.getresponse()
         data = response.read()
+        response_headers = dict(response.getheaders())
         conn.close()
-        return response.status, json.loads(data)
+        result = (response.status, json.loads(data))
+        return (*result, response_headers) if include_headers else result
 
     def login(self):
         status, data = self.request("POST", "/api/auth/login", {"username": "operator-test", "password": self.password})
@@ -69,6 +73,63 @@ class AdminAuthTests(unittest.TestCase):
         self.assertEqual(self.request("POST", "/api/auth/logout", {}, token=token), (200, {"ok": True}))
         self.assertEqual(self.request("GET", "/api/ips", token=token)[0], 401)
         self.assertEqual(self.request("POST", "/api/auth/logout", {}, token=token)[0], 401)
+
+    def cookie_login(self, **headers):
+        status, data, response_headers = self.request("POST", "/api/auth/login",
+            {"username": "operator-test", "password": self.password}, headers=headers, include_headers=True)
+        self.assertEqual(status, 200)
+        cookie = SimpleCookie(response_headers["Set-Cookie"])
+        session = cookie["cs_admin_session"]
+        self.assertTrue(session["httponly"])
+        self.assertEqual(session["samesite"], "Strict")
+        self.assertEqual(session["path"], "/api")
+        self.assertEqual(session["max-age"], str(SESSION_TTL))
+        return session, data
+
+    def test_browser_cookie_survives_navigation_and_logout_revokes_session(self):
+        session, data = self.cookie_login()
+        self.assertFalse(session["secure"])
+        cookie = "cs_admin_session=" + session.value
+        headers = {"Cookie": cookie}
+        # A fresh page has no JavaScript bearer token but sends its HTTP cookie.
+        self.assertEqual(self.request("GET", "/api/auth/session", headers=headers),
+                         (200, {"authenticated": True, "username": "operator-test"}))
+        self.assertEqual(self.request("GET", "/api/ips", headers=headers), (200, {"items": []}))
+        self.assertEqual(self.request("POST", "/api/auth/logout", {}, headers=headers)[0], 403)
+        origin = "http://127.0.0.1:" + str(self.server.server_port)
+        for hostile in ["https://other.example", "null", origin + ".other.example"]:
+            self.assertEqual(self.request("POST", "/api/auth/logout", {},
+                headers={**headers, "Origin": hostile})[0], 403)
+        status, _, response_headers = self.request("POST", "/api/auth/logout", {},
+            headers={**headers, "Origin": origin}, include_headers=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(SimpleCookie(response_headers["Set-Cookie"])["cs_admin_session"]["max-age"], "0")
+        self.assertEqual(self.request("GET", "/api/auth/session", headers=headers)[0], 401)
+        self.assertEqual(self.request("GET", "/api/auth/session", token=data["token"])[0], 401)
+
+    def test_cookie_expiry_legacy_token_and_invalid_cookie(self):
+        now = [100.0]
+        self.server.admin_auth._clock = lambda: now[0]
+        session, _ = self.cookie_login()
+        cookie = "cs_admin_session=" + session.value
+        now[0] += SESSION_TTL
+        self.assertEqual(self.request("GET", "/api/auth/session", headers={"Cookie": cookie})[0], 401)
+        for value in ["cs_admin_session=synthetic-legacy-admin-token", "cs_admin_session=invalid", "not a cookie"]:
+            self.assertEqual(self.request("GET", "/api/auth/session", headers={"Cookie": value})[0], 401)
+
+    def test_https_cookie_and_login_origin_validation(self):
+        self.server.RequestHandlerClass.base_url = "https://admin.example"
+        headers = {"Host": "admin.example", "X-Forwarded-Proto": "https", "Origin": "https://admin.example"}
+        session, _ = self.cookie_login(**headers)
+        self.assertTrue(session["secure"])
+        body = {"username": "operator-test", "password": self.password}
+        for extra in [{"Origin": "https://other.example"}, {"Sec-Fetch-Site": "cross-site"}]:
+            self.assertEqual(self.request("POST", "/api/auth/login", body, headers={**headers, **extra})[0], 403)
+        self.assertEqual(self.request("GET", "/api/auth/session", headers={**headers,
+            "Cookie": "cs_admin_session=" + session.value})[0], 200)
+        # A caller explicitly supplying a bad bearer cannot fall back to a cookie.
+        self.assertEqual(self.request("GET", "/api/auth/session", token="invalid",
+            headers={**headers, "Cookie": "cs_admin_session=" + session.value})[0], 401)
 
     def test_legacy_token_and_unconfigured_login_remain_supported(self):
         server = self.start_server("legacy", configured=False)

@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -17,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 from server.gateway import managed_nodes, ws_identity
 from server.subscription_server import DomainError, create_server, managed_clash, subscription_routing
 from tests.test_reality_gateway import REALITY
+from server.subscription_template import DEFAULT_TEMPLATE
 
 try:
     import yaml
@@ -74,6 +76,25 @@ class ManagedSubscriptionTests(unittest.TestCase):
         connection.close()
         return response, body
 
+    @unittest.skipUnless(yaml, 'optional PyYAML client parser')
+    def test_ws_only_preserves_token_and_identity_in_both_delivery_formats(self):
+        previous = managed_nodes({'id': 'person', 'ingress_uuid': self.store.db.execute("SELECT ingress_uuid FROM users WHERE id='person'").fetchone()[0]}, {'host': 'one.example'}, self.gateway)[1]
+        gateway = {'kind': 'xray-vless-ws', **WS}
+        self.server('one', gateway)
+        document = yaml.safe_load(self.download('clash'))
+        self.assertEqual(document['proxies'], [previous])
+        self.assertEqual(document['proxy-groups'][0]['proxies'], [previous['name']])
+        self.assertNotIn('reality-opts', document['proxies'][0])
+        uri = base64.b64decode(self.download('shadowrocket')).decode().strip()
+        parsed = urlsplit(uri)
+        self.assertEqual(parsed.username, previous['uuid'])
+        query = parse_qs(parsed.query)
+        self.assertEqual(query['type'], ['ws'])
+        self.assertEqual(query['security'], ['tls'])
+        self.assertNotIn('flow', query)
+        self.assertEqual(query['host'], [WS['host']])
+        self.assertEqual(query['path'], [WS['path']])
+
     def test_routing_query_is_explicit_and_strict_by_default(self):
         self.assertEqual(subscription_routing(''), 'strict')
         self.assertEqual(subscription_routing('format=clash&routing=domestic-direct'), 'domestic-direct')
@@ -108,6 +129,7 @@ class ManagedSubscriptionTests(unittest.TestCase):
             'DOMAIN-SUFFIX,claude.com,CLAUDE-SWITCHER',
             'DOMAIN-SUFFIX,clau.de,CLAUDE-SWITCHER',
             'DOMAIN-SUFFIX,claudeusercontent.com,CLAUDE-SWITCHER',
+            *DEFAULT_TEMPLATE['rules'],
             'MATCH,CLAUDE-SWITCHER'])
         self.assertNotIn('DIRECT', '\n'.join(document['rules']))
         domestic = managed_clash(managed_nodes({'id': 'person', 'ingress_uuid': 'b9303c18-3580-4757-8c75-50297d895d5b'}, {'host': 'one.example'}, self.gateway), routing_profile='domestic-direct')
@@ -126,12 +148,14 @@ class ManagedSubscriptionTests(unittest.TestCase):
             self.assertFalse(node['skip-cert-verify'])
             self.assertFalse(node['udp'])
         dns = document['dns']
-        self.assertEqual(dns['nameserver'], ['https://1.1.1.1/dns-query#CLAUDE-SWITCHER'])
+        self.assertEqual(dns['nameserver'], ['https://1.1.1.1/dns-query#CLAUDE-SWITCHER', 'https://8.8.8.8/dns-query#CLAUDE-SWITCHER'])
         for key in ['default-nameserver', 'proxy-server-nameserver']:
-            self.assertEqual(dns[key], ['https://1.1.1.1/dns-query#DIRECT'])
+            self.assertEqual(dns[key], ['https://223.5.5.5/dns-query#DIRECT', 'https://120.53.53.53/dns-query#DIRECT'])
         for key in ['ipv6', 'prefer-h3', 'use-hosts', 'use-system-hosts']:
             self.assertIs(dns[key], False)
-        self.assertEqual(dns['fake-ip-filter'], ['localhost', '+.local', '+.lan'])
+        self.assertEqual(dns['fake-ip-filter'][:3], ['localhost', '+.local', '+.lan'])
+        self.assertIn('+.pool.ntp.org', dns['fake-ip-filter'])
+        self.assertEqual(document['mixed-port'], 7897)
         for forbidden in ['fallback', 'direct-nameserver', 'nameserver-policy']:
             self.assertNotIn(forbidden, dns)
         self.assertEqual(dns['listen'], '127.0.0.1:1053')
@@ -166,6 +190,7 @@ class ManagedSubscriptionTests(unittest.TestCase):
         self.assertEqual(len({r['outboundTag'] for r in tcp_routes}), 1)
 
     def test_unconfigured_server_and_removed_backup_return_one_node(self):
+        self.stage_geodata()
         user = {'id': 'fixture', 'ingress_uuid': 'b9303c18-3580-4757-8c75-50297d895d5b'}
         one = managed_nodes(user, {'host': 'two.example'}, REALITY)
         self.assertEqual(len(one), 1)
@@ -180,16 +205,26 @@ class ManagedSubscriptionTests(unittest.TestCase):
         binary = Path(os.environ.get('MIHOMO_BIN', '/Applications/Clash Verge.app/Contents/MacOS/verge-mihomo'))
         if not binary.is_file():
             self.skipTest('optional local Mihomo executable')
+        self.stage_geodata()
         user = {'id': 'fixture', 'ingress_uuid': 'b9303c18-3580-4757-8c75-50297d895d5b'}
         document = managed_clash(managed_nodes(user, {'host': '192.0.2.1'}, self.gateway))
         result = subprocess.run([str(binary), '-d', self.temp.name, '-f', '/dev/stdin', '-t'],
                                 input=json.dumps(document).encode(), capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 0, 'Mihomo rejected synthetic generated document')
 
+    def stage_geodata(self):
+        directory = Path(os.environ.get('MIHOMO_GEODATA_DIR', str(Path.home() /
+            'Library/Application Support/io.github.clash-verge-rev.clash-verge-rev')))
+        source = directory / 'geosite.dat'
+        if not source.is_file():
+            self.skipTest('offline Mihomo geosite fixture unavailable')
+        shutil.copyfile(source, Path(self.temp.name) / 'geosite.dat')
+
     def test_actual_mihomo_fake_ip_and_aaaa_on_isolated_loopback_listener(self):
         binary = Path(os.environ.get('MIHOMO_BIN', '/Applications/Clash Verge.app/Contents/MacOS/verge-mihomo'))
         if not binary.is_file():
             self.skipTest('optional local Mihomo executable')
+        self.stage_geodata()
         from deploy.probe_mihomo_subscription import dns_probe
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
             listener.bind(('127.0.0.1', 0))
@@ -206,9 +241,14 @@ class ManagedSubscriptionTests(unittest.TestCase):
         try:
             process.stdin.write(json.dumps(document).encode())
             process.stdin.close()
-            time.sleep(.4)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and process.poll() is None:
+                if dns_probe(dns_port, 1):
+                    break
+                time.sleep(.1)
+            else:
+                self.fail('synthetic core failed to return fake-IP before deadline')
             self.assertIsNone(process.poll(), 'synthetic DNS core exited before query')
-            self.assertTrue(dns_probe(dns_port, 1), 'fake-IP answer missing')
             self.assertTrue(dns_probe(dns_port, 28), 'AAAA response was not empty')
         finally:
             if process.poll() is None:

@@ -9,6 +9,34 @@ import socket
 import sqlite3
 import subprocess
 import time
+import uuid
+
+
+def client_identity(identity, gateway):
+    if gateway['kind'] == 'xray-vless-ws':
+        return str(uuid.uuid5(uuid.UUID(identity), 'claude-switcher-ws-v1'))
+    return identity
+
+
+def client_config(server, gateway, identity, port):
+    if gateway['kind'] == 'xray-vless-ws':
+        address = gateway['address']
+        stream = {'network': 'ws', 'security': 'tls',
+                  'tlsSettings': {'serverName': gateway['server_name'], 'allowInsecure': False},
+                  'wsSettings': {'path': gateway['path'], 'headers': {'Host': gateway['host']}}}
+        account = {'id': identity, 'encryption': 'none'}
+    else:
+        address = server['host']
+        stream = {'network': 'tcp', 'security': 'reality', 'realitySettings': {
+            'fingerprint': 'chrome', 'serverName': gateway['server_name'],
+            'publicKey': gateway['public_key'], 'shortId': gateway['short_id']}}
+        account = {'id': identity, 'encryption': 'none', 'flow': gateway['flow']}
+    return {'log': {'loglevel': 'none'}, 'inbounds': [{
+        'tag': 'probe-socks', 'listen': '127.0.0.1', 'port': port, 'protocol': 'socks',
+        'settings': {'auth': 'noauth', 'udp': False}}], 'outbounds': [{
+        'tag': 'probe-managed', 'protocol': 'vless', 'settings': {'vnext': [{
+            'address': address, 'port': gateway['port'], 'users': [account]}]},
+        'streamSettings': stream}]}
 
 
 def connection_probe(database: Path, server_id: str, user_id: str, *, expect_disabled: bool = False) -> dict:
@@ -21,24 +49,16 @@ def connection_probe(database: Path, server_id: str, user_id: str, *, expect_dis
         if not server or not user:
             raise ValueError('unknown_target')
         gateway = json.loads(server['gateway_json'])
-        if gateway['kind'] != 'xray-vless-reality':
-            raise ValueError('reality_required')
+        if gateway['kind'] not in {'xray-vless-reality', 'xray-vless-ws'}:
+            raise ValueError('managed_gateway_required')
         if expect_disabled != (user['status'] == 'disabled'):
             raise ValueError('unexpected_identity_status')
         expected_address = user['address']
-        identity = user['ingress_uuid']
+        identity = client_identity(user['ingress_uuid'], gateway)
     with socket.socket() as listener:
         listener.bind(('127.0.0.1', 0))
         port = listener.getsockname()[1]
-    config = {'log': {'loglevel': 'none'}, 'inbounds': [{
-        'tag': 'probe-socks', 'listen': '127.0.0.1', 'port': port, 'protocol': 'socks',
-        'settings': {'auth': 'noauth', 'udp': False}}], 'outbounds': [{
-        'tag': 'probe-reality', 'protocol': 'vless', 'settings': {'vnext': [{
-            'address': server['host'], 'port': gateway['port'],
-            'users': [{'id': identity, 'encryption': 'none', 'flow': gateway['flow']}]}]},
-        'streamSettings': {'network': 'tcp', 'security': 'reality', 'realitySettings': {
-            'fingerprint': 'chrome', 'serverName': gateway['server_name'],
-            'publicKey': gateway['public_key'], 'shortId': gateway['short_id']}}}]}
+    config = client_config(server, gateway, identity, port)
     command = ['/usr/local/x-ui/bin/xray-linux-amd64', 'run', '-format', 'json', '-config', '/dev/stdin']
     test = subprocess.run(command + ['-test'], input=json.dumps(config).encode(),
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
@@ -87,7 +107,8 @@ def probe(database: Path, server_id: str, user_id: str, *, expect_disabled: bool
         with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as db:
             identity = db.execute('SELECT ingress_uuid FROM users WHERE id=?', (user_id,)).fetchone()[0]
         runtime = json.loads(Path('/usr/local/x-ui/bin/config.json').read_bytes())
-        absent = all(client.get('id') != identity for inbound in runtime.get('inbounds', [])
+        identities = {identity, client_identity(identity, {'kind': 'xray-vless-ws'})}
+        absent = all(client.get('id') not in identities for inbound in runtime.get('inbounds', [])
                      for client in inbound.get('settings', {}).get('clients',
                          inbound.get('settings', {}).get('users', [])))
         rejected = (result.get('client_started') is True and result.get('connected') is False

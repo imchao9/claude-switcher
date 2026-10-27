@@ -360,5 +360,135 @@ class ManagedWSSyncTests(unittest.TestCase):
         self.assertEqual(source_snapshot(config).revision, self.desired.revision)
 
 
+class WSOnlySyncTests(unittest.TestCase):
+    setUp = ManagedWSSyncTests.setUp
+    pin_ws = ManagedWSSyncTests.pin_ws
+    sync = ManagedWSSyncTests.sync
+    status = ManagedWSSyncTests.status
+    assert_routes = ManagedWSSyncTests.assert_routes
+
+    def only_ws(self, rows=None, status='active'):
+        if self.config.get('transport') != 'ws':
+            retired = {key: self.config[key] for key in ('inbound_id', 'inbound_tag', 'inbound_digest')}
+            self.config.update(self.config.pop('ws_backup'))
+            self.config.update(transport='ws', retired_reality=retired)
+        gateway = {'kind': 'xray-vless-ws', **WS}
+        server = dict(SERVER, status=status, gateway=gateway)
+        merge = xray_merge(server, gateway, [ROW] if rows is None else rows)
+        self.desired = Desired(desired_revision(server, merge), merge, gateway)
+        self.config['gateway_digest'] = digest(gateway)
+        validate_config(self.config)
+
+    def test_new_user_has_one_ws_identity_and_bound_routes(self):
+        self.only_ws()
+        before = self.panel.observe()
+        self.assertTrue(self.sync(), self.status())
+        state = self.files.load()
+        self.assertEqual(len(state['identities']), 1)
+        self.assertEqual({t['inbound_tag'] for t in state['identity_targets'].values()}, {'ws'})
+        self.assert_routes(state['identity_targets'], 'cs-vpn-residential-home')
+        self.assertEqual(self.panel.observed.clients['original'], before.clients['original'])
+        self.assertEqual(self.panel.observed.inbounds, before.inbounds)
+
+    def test_migration_retains_ws_uuid_and_revokes_only_managed_reality(self):
+        self.assertTrue(self.sync(), self.status())
+        old = copy.deepcopy(self.panel.observed.clients)
+        self.only_ws()
+        self.assertTrue(self.sync(), self.status())
+        for email, record in old.items():
+            current = self.panel.observed.clients[email]
+            self.assertEqual(current['client']['id'], record['client']['id'])
+            if email == 'original' or email.endswith('-ws@users.claude-switcher.invalid'):
+                self.assertEqual(current, record)
+            else:
+                self.assertFalse(current['client']['enable'])
+                self.assertEqual(self.panel.route('reality', email, 'tcp', 'example.com'), 'cs-vpn-block')
+        state = self.files.load()
+        self.assertIsNotNone(state['applied_revision'])
+        events = copy.deepcopy(self.panel.events)
+        self.assertTrue(self.sync())
+        self.assertEqual(events, self.panel.events)
+
+    def test_legacy_reality_only_state_without_targets_migrates_safely(self):
+        self.config.pop('ws_backup')
+        self.desired = ws_desired(backup=None)
+        self.assertTrue(self.sync(), self.status())
+        state = self.files.load()
+        state.pop('identity_targets')
+        self.files.save(state)
+        self.pin_ws()
+        self.only_ws()
+        self.assertTrue(self.sync(), self.status())
+        for email, target in self.files.load()['identity_targets'].items():
+            if target['inbound_tag'] == 'reality':
+                self.assertFalse(self.panel.observed.clients[email]['client']['enable'])
+            else:
+                self.assertTrue(self.panel.observed.clients[email]['client']['enable'])
+
+    def test_rebind_then_unbind_blocks_ws_without_reviving_reality(self):
+        self.assertTrue(self.sync())
+        self.only_ws()
+        self.assertTrue(self.sync())
+        self.only_ws(rows=[dict(ROW, ip_id='other', address='8.8.8.8')])
+        self.assertTrue(self.sync(), self.status())
+        for email, target in self.files.load()['identity_targets'].items():
+            expected = 'cs-vpn-residential-other' if target['inbound_tag'] == 'ws' else 'cs-vpn-block'
+            self.assertEqual(self.panel.route(target['inbound_tag'], email, 'tcp', 'example.com'), expected)
+        self.only_ws(rows=[])
+        self.assertTrue(self.sync(), self.status())
+        self.assert_routes(self.files.load()['identity_targets'], 'cs-vpn-block')
+        self.assertTrue(all(not self.panel.observed.clients[email]['client']['enable']
+                            for email in self.files.load()['identities']))
+
+    def test_server_disable_and_reenable(self):
+        self.only_ws()
+        self.assertTrue(self.sync())
+        self.only_ws(status='disabled')
+        self.assertTrue(self.sync(), self.status())
+        self.assert_routes(self.files.load()['identity_targets'], 'cs-vpn-block')
+        self.only_ws()
+        self.assertTrue(self.sync(), self.status())
+        self.assert_routes(self.files.load()['identity_targets'], 'cs-vpn-residential-home')
+
+    def test_restart_failure_is_guarded_and_recoverable(self):
+        self.only_ws()
+        self.assertTrue(self.sync())
+        self.only_ws(rows=[dict(ROW, address='8.8.8.8')])
+        self.panel.failure = 'restart'
+        self.assertFalse(self.sync())
+        self.assertEqual(self.status()['state'], 'blocked')
+        self.assertNotEqual(self.files.load()['applied_revision'], self.desired.revision)
+        self.assertEqual(self.files.load()['pending'], self.desired.revision)
+        self.assert_routes(self.files.load()['identity_targets'], 'cs-vpn-block')
+        self.assertTrue(self.sync(), self.status())
+        self.assert_routes(self.files.load()['identity_targets'], 'cs-vpn-residential-home')
+
+    def test_ws_origin_drift_refused(self):
+        self.only_ws()
+        self.panel.observed.inbounds[1]['streamSettings']['wsSettings']['path'] = '/other'
+        self.assertFalse(self.sync())
+        self.assertEqual(self.status()['code'], 'target_drift')
+        self.assertEqual(self.panel.events, [])
+
+    def test_ws_only_source_snapshot_and_primary_contract(self):
+        self.only_ws()
+        path = Path(self.config['source_db'])
+        with closing(sqlite3.connect(path)) as db, db:
+            db.executescript("""CREATE TABLE servers(id,host,status,gateway_json);
+                CREATE TABLE users(id,ingress_uuid,status);
+                CREATE TABLE ips(id,address,port,protocol,config_json,status,server_id);
+                CREATE TABLE bindings(user_id,ip_id);""")
+            db.execute('INSERT INTO servers VALUES(?,?,?,?)',
+                       ('vpn', SERVER['host'], 'active', json.dumps(self.desired.gateway)))
+            db.execute('INSERT INTO users VALUES(?,?,?)', ('u', ROW['ingress_uuid'], 'active'))
+            db.execute('INSERT INTO ips VALUES(?,?,?,?,?,?,?)',
+                       ('home', ROW['address'], ROW['port'], ROW['protocol'], ROW['config_json'], 'available', 'vpn'))
+            db.execute('INSERT INTO bindings VALUES(?,?)', ('u', 'home'))
+        self.assertEqual(source_snapshot(self.config).revision, self.desired.revision)
+        for changes in ({'transport': 'reality'}, {'tls_termination': 'xray'}):
+            with self.subTest(changes=changes), self.assertRaises(SyncError):
+                source_snapshot(dict(self.config, **changes))
+
+
 if __name__ == '__main__':
     unittest.main()

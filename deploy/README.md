@@ -43,11 +43,13 @@ ssh -S ~/.local/share/claude-switcher-server/vpn-host1-admin.sock \
 
 ## 核对实际代理接入
 
-服务器列表显示 3X-UI 同步结果。`已生效` 要求后台当前配置摘要、同步收据和运行时核对一致，且最近一次检查不超过 60 秒。它证明路由配置已应用；家庭 IP 的实际可用性仍需流量测试。
+订阅后台保存用户、住宅代理和绑定关系，并生成客户端订阅；独立 root 同步器读取本项目数据库，通过本机 3X-UI API 更新受管身份、出口和路由，Xray 执行实际流量转发。HTTP 后台不直接调用面板管理 API。全局订阅模板只影响客户端配置，不修改服务端住宅绑定。完整分工见 [服务端说明](../server/README.md#与-3x-ui-的分工与同步)。
+
+服务器列表显示 3X-UI 同步结果。`已应用到 3X-UI` 要求后台当前配置摘要、同步收据和运行时核对一致，且最近一次检查不超过 60 秒。它证明路由配置已应用；家庭 IP 的实际可用性仍需流量测试。
 
 `claude-switcher-sync.timer` 每次同步结束后等待 15 秒再检查。配置变化时，同步器先写入受管用户的拦截规则，再更新客户身份、家庭出口和路由，最后重启并核对 Xray。重绑、解绑和停用会断开旧连接，也会短暂影响同一 Xray 上的其他连接。未变更的轮询不写面板、不重启。
 
-同步器保留原有 Reality 用户、WS 入站、私钥及非受管路由。停用身份保留为禁用记录，并保留兜底拦截规则。API 失败时不会将状态标为成功。不要在同步过程中手工编辑面板的受管对象；面板 API 不提供跨请求事务。
+同步器保留非受管客户端、既有入站、私钥及非受管路由。迁移到 WS 时，仅禁用本项目原受管 Reality 身份，保留历史身份记录和拦截规则，不影响其他 Reality 用户。停用身份保留为禁用记录，并保留兜底拦截规则。API 失败时不会将状态标为成功。不要在同步过程中手工编辑面板的受管对象；面板 API 不提供跨请求事务。
 
 当前同步器只处理本机配置明确指定的一台服务器。后台可以登记多台服务器；其他服务器显示未配置，必须为各自的 3X-UI 配置对接后才会自动生效。
 
@@ -60,7 +62,7 @@ cat /var/lib/claude-switcher-sync-status/status.json
 
 根权限同步代码在 `/opt/claude-switcher-sync`。部署时复制完整的 `server/*.py` 包，因为包初始化会导入 HTTP 模块及其依赖。目标配置在 `/etc/claude-switcher-sync/config.json`，私有恢复记录在 `/var/lib/claude-switcher-sync/state.json`。这些文件由 root 管理，HTTP 用户不能修改。同步器从本机面板读取监听参数，通过固定 CLI 签发专用 API token，仅保留在进程内存中。
 
-实际出口检查使用一次性 Reality 客户端，不打印身份或出口 IP。将示例用户 ID 替换为需要检查的记录。
+实际出口检查使用与服务器配置一致的一次性 WS/TLS 客户端（历史 Reality 仍可诊断），不打印身份或出口 IP。将示例用户 ID 替换为需要检查的记录。
 
 ```bash
 cd /opt/claude-switcher/current
@@ -69,32 +71,19 @@ python3 -B deploy/probe_xray_binding.py --server-id vpn-host1 --user-id USER_ID
 
 启用用户成功时返回 `passed=true` 和 `egress_matches_binding=true`。对已经停用的用户增加 `--expect-disabled --control-user-id ENABLED_USER_ID`。只有停用身份已从运行配置中移除、连接失败且同期有效用户对照成功时，才返回 `disabled_connection_rejected=true`。
 
-## 可选 WS 目标与撤销
+## WS 唯一入口迁移与撤销
 
-服务器公开 `gateway.ws_backup` 不会创建入站、安装证书、修改 Tunnel 或自动纳管原有 WS。启用前需要人工核对目标入站，并在 root 私有的 `/etc/claude-switcher-sync/config.json` 保留原 Reality 锁定，增加以下可选字段：
+公开 gateway 使用 `kind: "xray-vless-ws"`，字段见服务端说明。root 私有 `/etc/claude-switcher-sync/config.json` 的主锁定应指向已经核验的 WS 入站，增加 `transport: "ws"` 与 `tls_termination: "external"`（或原生 TLS 的 `"xray"`）。其余必填项与原配置相同，`gateway_digest` 使用 `digest(gateway_server_identity(gateway))`。
 
-```json
-{
-  "ws_backup": {
-    "inbound_id": 2,
-    "inbound_tag": "managed-ws",
-    "inbound_digest": "<64位已审核入站摘要>",
-    "tls_termination": "external"
-  }
-}
-```
+从旧 Reality + WS 配置迁移时，暂停同步 timer/service，私下备份目标服务器 gateway、同步代码、配置、state 和旧订阅。把旧 `ws_backup` 的四个锁定字段提升到主配置；原主锁定的 `inbound_id`、`inbound_tag`、`inbound_digest` 放入 `retired_reality`，删除 `ws_backup`。保留原 state 中的身份、规则和 `identity_targets`，保持用户 UUID、令牌和住宅绑定不变。确认固定入站摘要、gateway 与同步器版本一致后再运行同步。
 
-这里只展示新增字段，不能代替原配置。`inbound_id`、tag 和摘要必须对应这台 3X-UI 的真实已启用 VLESS WS 入站，不能照抄示例或只根据名字信任。摘要采用 `server.xui_sync.digest(inbound_identity(inbound))`，其中 `inbound` 是 `panel_snapshot().inbounds` 中由 ID 精确选择的对象；不含客户端列表，但包含传输、安全、监听及其他固定元数据。不要打印完整入站对象，它含私钥等私密配置。
+WS 源站必须是真实且已启用的 VLESS WS 入站。摘要采用 `digest(inbound_identity(inbound))`，包含传输、安全、监听等元数据但不含客户端列表；禁止根据名称信任、遇漂移直接覆盖或打印含密钥的原始入站。外部 TLS 要求明文源站只监听 loopback；原生 TLS 要求公开端口匹配。
 
-`gateway_digest` 使用 `digest(gateway_server_identity(gateway))`。该函数只剥离客户端 ML-KEM 选项，所以旧 Reality 锁定在 ML-KEM 未声明、启用、禁用间保持兼容。新增或修改 WS 会改变该摘要，必须显式审核并更新锁定，不能遇到 `target_drift` 就盲目覆盖。
+同步器只启用本项目的 WS 身份。原受管 Reality 身份禁用并保留拦截规则，非受管客户端和入站保持原配置。历史 Reality pin 继续保留以完成撤销；不要删除 state、历史身份或目标 pin。停用、解绑、换绑和故障恢复都按已知身份执行，不能把空列表当作撤销成功。共享 Xray 重启可能短暂影响其他连接。
 
-`tls_termination: "xray"` 要求原生 WS+TLS，入站端口与公开 TLS 端口一致。`"external"` 要求 WS 明文源站只监听 IP loopback，公网连接地址与端口单独登记。同步会核对路径及源站已设置的 Host，不能因此推断外部 TLS 证书或反向代理已验收。外部代理没有在源站配置 Host 校验时，也不代表已经验证公网 Host 转发。
+发布前在隔离环境验证身份保留、住宅换绑、停用、源站漂移和故障恢复；发布后重新下载新旧真实地址，用独立内核验证实际 TLS/HTTP/HTTPS、出口与业务 DNS。`已应用到 3X-UI` 收据表示面板和运行配置已核对，不能代替公网流量或手机真机验收。小火箭格式还需 iOS 实际导入，Android 则需刷新订阅并重新选择住宅节点。
 
-每用户的 WS 身份独立于 Reality 身份，两者 TCP 都指向同一个家庭出站，UDP 都拒绝。同步器先保护全部目标，再更新身份和绑定；停用、解绑、换绑及故障恢复都覆盖两个入口。未纳管客户端和入站保持原有配置。共享 Xray 重启仍可能短暂影响其他连接。
-
-移除公开 `ws_backup` 后，仍须保留 root 配置里的 WS pin；同步器利用私有状态中的 `identity_targets` 找到历史身份，将它禁用并保留拦截规则。不要删除状态、手工清空历史身份或先删 pin。缺少历史目标锁定、身份冲突或入站漂移会拒绝同步，而不会把空快照当作撤销成功。当前版本不自动垃圾回收退休目标 pin。
-
-`已生效` 收据只表示已锁定的面板、运行配置和路由核对一致。交付 WS 前，还须用实际下载订阅分别验证主、备用节点：TLS/HTTPS、中立 HTTP 目标、固定出口、真实业务 DNS 响应、停用两条身份后的拒绝行为。独立测试工具见 [订阅说明](../server/README.md#订阅兼容与可选-ws-备用)。保持既有 TUN 开启的测试不能证明 Antify 可独立替代它。
+回滚必须先停止同步，再按私有备份恢复旧 gateway、同步代码/配置/state 与旧订阅；核验原目标后重新同步并恢复 timer。仅回退后台 symlink 无法撤销此迁移，禁止恢复整个活跃数据库覆盖其他业务变更。
 
 ## 升级和回滚后台
 

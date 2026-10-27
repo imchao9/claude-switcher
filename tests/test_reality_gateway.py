@@ -25,7 +25,7 @@ class ManagedGatewayContractTests(unittest.TestCase):
     def setUp(self):
         self.user = {'id': 'fixture', 'ingress_uuid': '65a847df-0c10-4b14-a221-5788b7c22dbf'}
         self.server = {'id': 'one', 'host': 'gateway.example', 'status': 'active', 'gateway': REALITY}
-        self.binding = {**self.user, 'ip_id': 'home', 'protocol': 'socks5', 'address': '8.8.8.8',
+        self.binding = {**self.user, 'ip_id': 'home', 'protocol': 'socks5', 'address': '8.8.4.4',
                         'port': 1080, 'config_json': '{"username":"fixture-user","password":"fixture-secret"}'}
 
     def test_mlkem_is_explicit_per_server_and_does_not_change_old_route_revision(self):
@@ -97,7 +97,7 @@ class ManagedGatewayContractTests(unittest.TestCase):
         self.assertEqual(query['allowInsecure'], ['0'])
         self.assertNotIn('flow', query)
         self.assertNotIn('pbk', query)
-        for secret in ('fixture-secret', 'fixture-user', '8.8.8.8'):
+        for secret in ('fixture-secret', 'fixture-user', '8.8.4.4'):
             self.assertNotIn(secret, json.dumps([primary, backup]) + uri)
 
     def test_merge_adds_ws_to_same_egress_and_keeps_legacy_shape(self):
@@ -133,7 +133,7 @@ class RealityGatewayTests(unittest.TestCase):
         self.thread.start()
         for identifier in ['one', 'two']:
             self.store.add_server({'id': identifier, 'name': identifier, 'host': identifier + '.example', 'gateway': REALITY})
-            self.store.add_ip({'id': identifier + '-exit', 'server_id': identifier, 'address': '8.8.8.8' if identifier == 'one' else '1.1.1.1',
+            self.store.add_ip({'id': identifier + '-exit', 'server_id': identifier, 'address': '8.8.4.4' if identifier == 'one' else '1.1.1.1',
                                'port': 1080, 'protocol': 'socks5', 'config': {'username': identifier + '-login', 'password': identifier + '-secret'}})
         self.created = self.store.create_user({'id': 'user', 'ip_id': 'one-exit'}, 'https://fixture.invalid')
 
@@ -170,10 +170,10 @@ class RealityGatewayTests(unittest.TestCase):
         for format in ['clash', 'uri', 'base64']:
             status, headers, body = self.request('/s/' + self.created['token'] + '?format=' + format, False)
             self.assertEqual(status, 200)
-            self.assertEqual(headers['X-Claude-Switcher-Egress-IP'], '8.8.8.8')
+            self.assertEqual(headers['X-Claude-Switcher-Egress-IP'], '8.8.4.4')
             if format == 'base64':
                 body = base64.b64decode(body)
-            for secret in [b'8.8.8.8', b'one-login', b'one-secret', self.created['token'].encode()]:
+            for secret in [b'8.8.4.4', b'one-login', b'one-secret', self.created['token'].encode()]:
                 self.assertNotIn(secret, body)
             if format == 'clash':
                 for expected in [b'reality-opts:', b'public-key:', b'short-id:', b'flow: "xtls-rprx-vision"', b'client-fingerprint: "chrome"', b'udp: false']:

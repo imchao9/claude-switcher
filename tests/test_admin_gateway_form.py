@@ -67,6 +67,24 @@ const values=()=>Object.fromEntries([...nodes.values()].filter(node=>node.name).
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout) if result.stdout.strip() else None
 
+    def test_ws_only_edit_save_preserves_independent_entry(self):
+        gateway = {'kind': 'xray-vless-ws', **WS}
+        saved = self.execute('''
+assert(validPublicProfile(profile));
+fillServerForm(profile);
+assert.equal(byId('gateway-ws-fields').hidden,false);
+assert.equal(byId('gateway-ws-fields').disabled,false);
+assert.equal(byId('gateway-reality-fields').hidden,true);
+assert.equal(byId('gateway-public-key').required,false);
+assert.equal(byId('gateway-port').required,false);
+const saved=serverPayload(values(),true,false);
+assert.deepEqual(saved,profile);
+fillServerForm(saved);
+assert.deepEqual(serverPayload(values(),true,true),saved);
+console.log(JSON.stringify(saved));
+''', {**PROFILE, 'gateway': gateway})
+        self.assertEqual(validate_gateway(saved['gateway']), gateway)
+
     def test_import_edit_save_and_reopen_preserve_optional_fields(self):
         for capability in [None, True, False]:
             gateway = {**REALITY, 'ws_backup': WS}

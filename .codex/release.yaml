@@ -1,0 +1,23 @@
+version: 1
+provider: ssh
+branch: main
+
+# This deployment uses the reviewed server workspace snapshot.
+# Its exact files and digests are recorded in the private deployment manifest.
+preflight:
+  command: python3 -B -m unittest discover -s tests -p test_public_subscription_urls.py
+
+ssh:
+  host: vpn-host1
+  deploy_command: /usr/bin/python3 -B /var/lib/claude-switcher-deploy/upgrade/release/deploy/upgrade_vpn_host1.py --stage /var/lib/claude-switcher-deploy/upgrade
+
+verify:
+  - url: http://127.0.0.1:8787/healthz
+    expect_status: 200
+    no_proxy: true
+  - url: https://sub.610247.xyz/sub/cs_deployment_probe_missing/vpn-host1.yaml
+    expect_status: 404
+    no_proxy: true
+  - url: https://sub.610247.xyz/admin
+    expect_status: 200
+    no_proxy: true

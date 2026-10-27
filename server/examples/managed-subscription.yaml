@@ -1,72 +1,110 @@
-# Public, non-functional fixture for local parser checks. Replace the node
-# values only in a private downloaded subscription; never commit credentials.
-mixed-port: 7890
-bind-address: 127.0.0.1
+# Public, non-functional WS + TLS fixture generated from the default global template.
+# Replace node values only in a private subscription; never commit credentials.
+mixed-port: 7897
+bind-address: "127.0.0.1"
 allow-lan: false
+mode: "rule"
+log-level: "silent"
 ipv6: false
-mode: rule
-log-level: warning
+unified-delay: true
+tcp-concurrent: true
+find-process-mode: "strict"
+profile:
+  store-selected: true
+sniffer:
+  enable: true
+  parse-pure-ip: true
+  override-destination: false
+  force-dns-mapping: true
+  sniff:
+    TLS:
+      ports:
+        - 443
+    HTTP:
+      ports:
+        - 80
+        - 8080
+        - 8443
+geodata-mode: true
+geo-auto-update: false
+geox-url:
+  geoip: "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat"
+  geosite: "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat"
+  mmdb: "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country.mmdb"
 proxies:
-  - name: example-gateway-reality
-    type: vless
-    server: reality.example.invalid
+  - name: "example-gateway-ws"
+    type: "vless"
+    server: "ws.example.invalid"
     port: 443
-    uuid: 00000000-0000-4000-8000-000000000000
+    uuid: "00000000-0000-4000-8000-000000000001"
     tls: true
-    servername: reality.example.invalid
+    servername: "ws.example.invalid"
     skip-cert-verify: false
-    network: tcp
-    udp: false
-    flow: xtls-rprx-vision
-    client-fingerprint: chrome
-    reality-opts:
-      public-key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-      short-id: 12ab
-  - name: example-gateway-ws
-    type: vless
-    server: ws.example.invalid
-    port: 443
-    uuid: 00000000-0000-4000-8000-000000000001
-    tls: true
-    servername: ws.example.invalid
-    skip-cert-verify: false
-    network: ws
+    network: "ws"
     udp: false
     ws-opts:
-      path: /managed-ws
+      path: "/managed-ws"
       headers:
-        Host: origin.example.invalid
+        Host: "origin.example.invalid"
 proxy-groups:
-  - name: CLAUDE-SWITCHER
-    type: select
+  - name: "CLAUDE-SWITCHER"
+    type: "select"
     proxies:
-      - example-gateway-reality
-      - example-gateway-ws
-rules:
-  - NETWORK,udp,REJECT
-  - DOMAIN-SUFFIX,claude.ai,CLAUDE-SWITCHER
-  - DOMAIN-SUFFIX,anthropic.com,CLAUDE-SWITCHER
-  - DOMAIN-SUFFIX,claude.com,CLAUDE-SWITCHER
-  - DOMAIN-SUFFIX,clau.de,CLAUDE-SWITCHER
-  - DOMAIN-SUFFIX,claudeusercontent.com,CLAUDE-SWITCHER
-  - MATCH,CLAUDE-SWITCHER
+      - "example-gateway-ws"
 dns:
   enable: true
-  listen: 127.0.0.1:1053
+  listen: "127.0.0.1:1053"
   ipv6: false
-  enhanced-mode: fake-ip
-  fake-ip-range: 198.18.0.1/16
+  enhanced-mode: "fake-ip"
+  fake-ip-range: "198.18.0.1/16"
   fake-ip-filter:
-    - localhost
-    - +.local
-    - +.lan
+    - "localhost"
+    - "+.local"
+    - "+.lan"
+    - "+.pool.ntp.org"
+    - "time.*.com"
+    - "ntp.*.com"
+    - "msftconnecttest.com"
+    - "msftncsi.com"
   respect-rules: true
   prefer-h3: false
   use-hosts: false
   use-system-hosts: false
   default-nameserver:
-    - https://1.1.1.1/dns-query#DIRECT
+    - "https://223.5.5.5/dns-query#DIRECT"
+    - "https://120.53.53.53/dns-query#DIRECT"
   proxy-server-nameserver:
-    - https://1.1.1.1/dns-query#DIRECT
+    - "https://223.5.5.5/dns-query#DIRECT"
+    - "https://120.53.53.53/dns-query#DIRECT"
   nameserver:
-    - https://1.1.1.1/dns-query#CLAUDE-SWITCHER
+    - "https://1.1.1.1/dns-query#CLAUDE-SWITCHER"
+    - "https://8.8.8.8/dns-query#CLAUDE-SWITCHER"
+tun:
+  enable: false
+rules:
+  - "NETWORK,udp,REJECT"
+  - "DOMAIN-SUFFIX,claude.ai,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,anthropic.com,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,claude.com,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,clau.de,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,claudeusercontent.com,CLAUDE-SWITCHER"
+  - "GEOSITE,category-ads-all,REJECT"
+  - "DOMAIN-KEYWORD,stun,REJECT"
+  - "DOMAIN-SUFFIX,browserleaks.com,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,ipleak.net,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,dnsleaktest.com,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,statsigapi.net,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,openai.com,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,chatgpt.com,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,oaistatic.com,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,oaiusercontent.com,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,arkoselabs.com,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,statsig.com,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,featuregates.org,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,gemini.google.com,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,x.ai,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,grok.com,CLAUDE-SWITCHER"
+  - "DOMAIN-SUFFIX,perplexity.ai,CLAUDE-SWITCHER"
+  - "DOMAIN-KEYWORD,arkose,CLAUDE-SWITCHER"
+  - "DOMAIN,challenges.cloudflare.com,CLAUDE-SWITCHER"
+  - "MATCH,CLAUDE-SWITCHER"

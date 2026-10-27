@@ -1,4 +1,4 @@
-6a60c94ae0b76b869bafa2005d5d4932a5749fadc91442be27621378fda1ef64  core/claude-switch.sh
+cd37d82ec771ddedb1061853c37b485bcdb63710949bff8c9dc02974b28abaa5  core/claude-switch.sh
 e4f488a7b2d9b7405cc2cb74c98f3c0b2ffd5f5a4cd61cb2bbdeadee0a957b06  core/claude-code.py
 b423fce9ee729d554494b9ec6905aa00d766e7de63c3ad5f44deba38231e433e  daemons/claude-bodyguard.sh
 c8047fa7bc51bcdf93037d639a6d189b2b611fa2a6aa07719dbe4781d3f0cb29  daemons/tz-watchdog.sh

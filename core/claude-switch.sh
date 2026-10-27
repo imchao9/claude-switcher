@@ -803,7 +803,7 @@ def legacy_nodes(text):
             parent[key] = json.loads(value)
         else:
             parent[key] = scalar(value)
-    if len(nodes) != 3 or len({n["name"] for n in nodes}) != 3:
+    if len(nodes) not in (2, 3) or len({n["name"] for n in nodes}) != len(nodes):
         raise ValueError()
     return nodes
 
@@ -812,11 +812,13 @@ def normalize(text):
     nodes = legacy_nodes(text)
     by_name = {n["name"]: n for n in nodes}
     home = by_name["住宅出口"]
-    main = by_name["vpn-host1"]
+    main = by_name.get("vpn-host1")
+    if set(by_name) != ({"住宅出口", "vpn-host1-iOS-WS"} | ({"vpn-host1"} if main else set())):
+        raise ValueError()
     backup = by_name["vpn-host1-iOS-WS"]
     allowed_home = {"name", "type", "server", "port", "username", "password", "udp", "dialer-proxy"}
     if (set(home) - allowed_home or home.get("type") != "socks5"
-            or home.get("dialer-proxy") != main["name"]):
+            or home.get("dialer-proxy") != (main or backup)["name"]):
         raise ValueError()
     address = ipaddress.ip_address(home["server"])
     if not address.is_global or address.version != 4:
@@ -827,15 +829,15 @@ def normalize(text):
         raise ValueError()
     allowed_entry = {"name", "type", "server", "port", "uuid", "network", "tls", "udp", "flow",
                      "servername", "client-fingerprint", "skip-cert-verify", "reality-opts", "alpn", "ws-opts"}
-    for node, network in ((main, "tcp"), (backup, "ws")):
+    for node, network in ([(main, "tcp")] if main else []) + [(backup, "ws")]:
         if (set(node) - allowed_entry or node.get("type") != "vless" or node.get("network") != network
                 or node.get("tls") is not True or node.get("skip-cert-verify") is not False
                 or not port(node) or not all(isinstance(node.get(k), str) and node[k] for k in ("server", "servername"))):
             raise ValueError()
         UUID(node["uuid"])
         node["udp"] = False
-    reality = main.get("reality-opts")
-    if (not isinstance(reality, dict) or set(reality) - {"public-key", "short-id", "support-x25519mlkem768"}
+    reality = main.get("reality-opts") if main else None
+    if main and (not isinstance(reality, dict) or set(reality) - {"public-key", "short-id", "support-x25519mlkem768"}
             or not isinstance(reality.get("public-key"), str) or not reality["public-key"]
             or not isinstance(reality.get("short-id"), str)):
         raise ValueError()
@@ -849,22 +851,22 @@ def normalize(text):
             or not all(isinstance(v, str) for v in backup["alpn"])):
         raise ValueError()
     routes = []
-    for entry, suffix in ((main, "Reality"), (backup, "WS")):
+    for entry, suffix in ([(main, "Reality")] if main else []) + [(backup, "WS")]:
         route = copy.deepcopy(home)
         route.update({"name": "旧订阅住宅-" + suffix, "dialer-proxy": entry["name"], "udp": False})
         routes.append(route)
     group = "CLAUDE-SWITCHER"
     protected = ("claude.ai", "anthropic.com", "claude.com", "clau.de", "claudeusercontent.com")
     document = {"mixed-port": 7890, "bind-address": "127.0.0.1", "allow-lan": False,
-                "ipv6": False, "mode": "rule", "log-level": "warning", "proxies": [main, backup] + routes,
+                "ipv6": False, "mode": "rule", "log-level": "warning", "proxies": ([main] if main else []) + [backup] + routes,
                 "proxy-groups": [{"name": group, "type": "select", "proxies": [n["name"] for n in routes]}],
                 "rules": ["NETWORK,udp,REJECT"] + ["DOMAIN-SUFFIX," + d + "," + group for d in protected] + ["MATCH," + group],
                 "dns": {"enable": True, "listen": "127.0.0.1:1053", "ipv6": False,
                         "enhanced-mode": "fake-ip", "fake-ip-range": "198.18.0.1/16",
                         "fake-ip-filter": ["localhost", "+.local", "+.lan"], "respect-rules": True,
                         "prefer-h3": False, "use-hosts": False, "use-system-hosts": False,
-                        "default-nameserver": ["https://1.1.1.1/dns-query#DIRECT"],
-                        "proxy-server-nameserver": ["https://1.1.1.1/dns-query#DIRECT"],
+                        "default-nameserver": ["https://223.5.5.5/dns-query#DIRECT", "https://120.53.53.53/dns-query#DIRECT"],
+                        "proxy-server-nameserver": ["https://223.5.5.5/dns-query#DIRECT", "https://120.53.53.53/dns-query#DIRECT"],
                         "nameserver": ["https://1.1.1.1/dns-query#" + group]}}
     # 各顶层字段使用 JSON flow 值（合法 YAML），保留现有 proxies: 检测契约。
     output = []

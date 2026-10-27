@@ -6,7 +6,7 @@
 
 交付页分别显示、隐藏和复制两个格式的地址，不依赖客户端 User-Agent 猜测。显式 `format=clash`、`uri`、`base64`、`shadowrocket` 优先于 User-Agent，最后两种输出相同。空值、重复值和无效格式返回 HTTP 400。成功、格式错误和已撤销订阅均返回 `Cache-Control: no-store` 与 `Vary: User-Agent`。
 
-托管入口的订阅仅含当前用户的一个 VLESS 节点。它复用原有 UUID、令牌和住宅出口绑定，不包含住宅上游账号密码。Reality 节点保留公开密钥、Short ID、SNI、TCP、Vision 与 Chrome 指纹参数，`allowInsecure=0`。
+托管入口的订阅仅含当前用户的一个 VLESS + WS + TLS 节点，使用其稳定派生的独立 WS UUID；Clash 与小火箭格式使用同一身份、令牌和住宅出口绑定，不包含住宅上游账号密码。URI 明确包含 `type=ws`、`security=tls`、SNI、WS Host 与 path，`allowInsecure=0`，不包含 Reality 或 Vision flow。
 
 云入口到每位用户专属住宅出口的链路由服务端处理，用户无需手工配置链式代理。导入后在小火箭中将 Global Routing（全局路由）设为 Proxy（代理），选择分配给自己的节点，并开启 VPN。节点订阅不会配置小火箭的全局路由、UDP 或 DNS；导入后仍需在 iOS 设备上核验实际出口、UDP 和 DNS 行为。服务端节点交付测试不能证明整台设备防泄漏。此变更未经过 iOS 小火箭真机导入验收。
 

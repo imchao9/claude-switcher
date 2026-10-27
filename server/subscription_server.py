@@ -25,6 +25,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http import HTTPStatus
+from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -42,47 +43,17 @@ MAX_BODY = 64 * 1024
 SUBSCRIPTION_PATH_RE = re.compile(r"/sub/(cs_[A-Za-z0-9_-]+)/([A-Za-z0-9][A-Za-z0-9_.-]{0,63})\.yaml")
 LEGACY_PATH_RE = re.compile(r"/s/(cs_[A-Za-z0-9_-]+)")
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+ADMIN_SESSION_COOKIE = "cs_admin_session"
 
 
-PROTECTED_AI_DOMAINS = (
-    "claude.ai",
-    "anthropic.com",
-    "claude.com",
-    "clau.de",
-    "claudeusercontent.com",
-)
+from .subscription_template import (DEFAULT_TEMPLATE, PROTECTED_AI_DOMAINS, render_template,
+                                    validate_template, template_revision)
 
-ROUTING_RULES = {
-    "strict": (),
-    "domestic-direct": (
-        "DOMAIN-SUFFIX,codemaster.com.cn,DIRECT",
-        "DOMAIN-SUFFIX,codemao.cn,DIRECT",
-        "GEOIP,CN,DIRECT,no-resolve",
-    ),
-}
+ROUTING_RULES = {"strict": (), "domestic-direct": tuple(DEFAULT_TEMPLATE["domestic_direct_rules"])}
 
 
-def managed_clash(nodes: list[dict[str, Any]], *, routing_profile: str = "strict") -> dict[str, Any]:
-    if routing_profile not in ROUTING_RULES:
-        raise ValueError("unknown routing profile")
-    group = "CLAUDE-SWITCHER"
-    # Only entry/resolver bootstrap is direct. Application DNS has no direct fallback.
-    bootstrap = "https://1.1.1.1/dns-query#DIRECT"
-    rules = ["NETWORK,udp,REJECT"]
-    rules.extend(f"DOMAIN-SUFFIX,{domain},{group}" for domain in PROTECTED_AI_DOMAINS)
-    rules.extend(ROUTING_RULES[routing_profile])
-    rules.append("MATCH," + group)
-    return {"mixed-port": 7890, "bind-address": "127.0.0.1", "allow-lan": False,
-            "ipv6": False, "mode": "rule", "log-level": "warning", "proxies": nodes,
-            "proxy-groups": [{"name": group, "type": "select", "proxies": [node["name"] for node in nodes]}],
-            "dns": {"enable": True, "listen": "127.0.0.1:1053", "ipv6": False,
-                    "enhanced-mode": "fake-ip", "fake-ip-range": "198.18.0.1/16",
-                    "fake-ip-filter": ["localhost", "+.local", "+.lan"],
-                    "respect-rules": True, "prefer-h3": False,
-                    "use-hosts": False, "use-system-hosts": False,
-                    "default-nameserver": [bootstrap], "proxy-server-nameserver": [bootstrap],
-                    "nameserver": ["https://1.1.1.1/dns-query#" + group]},
-            "rules": rules}
+def managed_clash(nodes: list[dict[str, Any]], *, routing_profile: str = "strict", template=None) -> dict[str, Any]:
+    return render_template(nodes, template=template, routing_profile=routing_profile)
 
 PUBLIC_FIELDS = {
     "server",
@@ -149,7 +120,7 @@ def integration_status(store: SubscriptionStore, server_id: str, status_path: Pa
         if server is None:
             raise DomainError("unknown server")
         revision = None
-        if server["gateway"] and server["gateway"]["kind"] == "xray-vless-reality":
+        if server["gateway"] and server["gateway"]["kind"] in {"xray-vless-reality", "xray-vless-ws"}:
             revision = desired_revision(server, store.export_xray_config(server_id, merge=True))
     result = {"server_id": server_id, "state": "unconfigured", "desired_revision": revision,
               "applied_revision": None, "checked_at": None, "applied_at": None,
@@ -398,7 +369,7 @@ def yaml_lines(value: Any, indent: int = 0) -> list[str]:
     return [f"{pad}{yaml_scalar(value)}"]
 
 
-def render_clash(user: dict[str, Any], ip: dict[str, Any], *, routing_profile: str = "strict") -> str:
+def render_clash(user: dict[str, Any], ip: dict[str, Any], *, routing_profile: str = "strict", template=None) -> str:
     if routing_profile not in ROUTING_RULES:
         raise DomainError("invalid subscription routing")
     config = json.loads(ip["config_json"])
@@ -415,35 +386,7 @@ def render_clash(user: dict[str, Any], ip: dict[str, Any], *, routing_profile: s
             continue
         if key in config:
             proxy[key] = config[key]
-    group_name = "CLAUDE-SWITCHER"
-    document = {
-        "mixed-port": 7890,
-        "bind-address": "127.0.0.1",
-        "allow-lan": False,
-        "ipv6": False,
-        "mode": "rule",
-        "log-level": "warning",
-        "proxies": [proxy],
-        "proxy-groups": [{"name": group_name, "type": "select", "proxies": [name]}],
-        "dns": {"enable": True, "listen": "127.0.0.1:1053", "ipv6": False,
-                "enhanced-mode": "fake-ip", "fake-ip-range": "198.18.0.1/16",
-                "fake-ip-filter": ["localhost", "+.local", "+.lan"],
-                "respect-rules": True, "prefer-h3": False, "use-hosts": False,
-                "use-system-hosts": False,
-                "default-nameserver": ["https://1.1.1.1/dns-query#DIRECT"],
-                "proxy-server-nameserver": ["https://1.1.1.1/dns-query#DIRECT"],
-                "nameserver": ["https://1.1.1.1/dns-query#" + group_name]},
-        "rules": [
-            "NETWORK,udp,REJECT",
-            f"DOMAIN-SUFFIX,claude.ai,{group_name}",
-            f"DOMAIN-SUFFIX,anthropic.com,{group_name}",
-            f"DOMAIN-SUFFIX,claude.com,{group_name}",
-            f"DOMAIN-SUFFIX,clau.de,{group_name}",
-            f"DOMAIN-SUFFIX,claudeusercontent.com,{group_name}",
-            *ROUTING_RULES[routing_profile],
-            "MATCH," + group_name,
-        ],
-    }
+    document = managed_clash([proxy], routing_profile=routing_profile, template=template)
     return "\n".join(yaml_lines(document)) + "\n"
 
 
@@ -542,6 +485,8 @@ class SubscriptionStore:
                     self.db.execute("ALTER TABLE ips ADD COLUMN server_id TEXT REFERENCES servers(id)")
                 self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS ips_address_unique ON ips(address)")
                 self.db.execute("CREATE INDEX IF NOT EXISTS ips_server_id ON ips(server_id)")
+                self.db.execute("""CREATE TABLE IF NOT EXISTS subscription_settings (
+                    id INTEGER PRIMARY KEY CHECK(id=1), template_json TEXT NOT NULL)""")
                 migrate_materials(self.db)
                 self.db.execute("""CREATE TABLE IF NOT EXISTS bindings (
                     user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -553,6 +498,32 @@ class SubscriptionStore:
         except Exception:
             self.db.close()
             raise
+
+    def subscription_template(self) -> dict[str, Any]:
+        with self._lock:
+            row = self.db.execute("SELECT template_json FROM subscription_settings WHERE id=1").fetchone()
+            template = json.loads(row[0]) if row else json.loads(json.dumps(DEFAULT_TEMPLATE))
+        preview_node = {"name": "example-ws-tls", "type": "vless", "server": "edge.example.invalid",
+                        "port": 443, "uuid": "00000000-0000-4000-8000-000000000000", "network": "ws",
+                        "tls": True, "skip-cert-verify": False, "udp": False,
+                        "servername": "edge.example.invalid",
+                        "ws-opts": {"path": "/example-ws", "headers": {"Host": "edge.example.invalid"}}}
+        previews = {profile: "\n".join(yaml_lines(managed_clash([preview_node], template=template,
+                    routing_profile=profile))) + "\n" for profile in ROUTING_RULES}
+        return {"template": template, "revision": template_revision(template), "previews": previews}
+
+    def save_subscription_template(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if set(payload) != {"template", "revision"}:
+            raise DomainError("invalid subscription template request")
+        template = validate_template(payload["template"])
+        with self._lock, self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            if payload["revision"] != self.subscription_template()["revision"]:
+                raise DomainError("subscription template changed; reload before saving")
+            self.db.execute("INSERT INTO subscription_settings(id,template_json) VALUES(1,?) "
+                            "ON CONFLICT(id) DO UPDATE SET template_json=excluded.template_json",
+                            (json.dumps(template, ensure_ascii=False),))
+            return self.subscription_template()
 
     @property
     def materials(self) -> ServerMaterials:
@@ -999,7 +970,8 @@ class SubscriptionStore:
                 elif fmt == "base64":
                     body, content_type = base64.b64encode(uri.encode()) + b"\n", "text/plain; charset=utf-8"
                 else:
-                    document = managed_clash(nodes, routing_profile=routing_profile)
+                    document = managed_clash(nodes, routing_profile=routing_profile,
+                                             template=self.subscription_template()["template"])
                     body, content_type = ("\n".join(yaml_lines(document)) + "\n").encode(), "text/yaml; charset=utf-8"
             elif fmt == "uri":
                 body = (render_uri(user, ip) + "\n").encode()
@@ -1008,7 +980,8 @@ class SubscriptionStore:
                 body = (base64.b64encode(render_uri(user, ip).encode()).decode() + "\n").encode()
                 content_type = "text/plain; charset=utf-8"
             else:
-                body = render_clash(user, ip, routing_profile=routing_profile).encode()
+                body = render_clash(user, ip, routing_profile=routing_profile,
+                                    template=self.subscription_template()["template"]).encode()
                 content_type = "text/yaml; charset=utf-8"
             headers = {"X-Claude-Switcher-Egress-IP": row["address"], "X-Claude-Switcher-User": row["id"]}
             return body, content_type, row["address"], headers
@@ -1072,10 +1045,42 @@ class SubscriptionHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.FORBIDDEN, "admin_https_required")
         return False
 
-    def _json(self, status: int, value: dict[str, Any]) -> None:
+    def _browser_origin(self) -> str:
+        authority = self.headers.get("Host", "")
+        if urlsplit("//" + authority).hostname not in LOOPBACK_HOSTS:
+            return self.base_url
+        scheme = "https" if self.headers.get_all("X-Forwarded-Proto", []) == ["https"] else "http"
+        return public_origin(scheme + "://" + authority)
+
+    def _same_origin(self) -> bool:
+        return self.headers.get_all("Origin", []) == [self._browser_origin()]
+
+    def _session_token(self) -> str:
+        authorization = self.headers.get("Authorization")
+        if authorization is not None:
+            return authorization[7:] if authorization.startswith("Bearer ") else ""
+        try:
+            cookie = SimpleCookie()
+            cookie.load(self.headers.get("Cookie", ""))
+            return cookie[ADMIN_SESSION_COOKIE].value if ADMIN_SESSION_COOKIE in cookie else ""
+        except CookieError:
+            return ""
+
+    def _json(self, status: int, value: dict[str, Any], *, session_token: str | None = None) -> None:
         body = json.dumps(value, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        if session_token is not None:
+            cookie = SimpleCookie()
+            cookie[ADMIN_SESSION_COOKIE] = session_token
+            item = cookie[ADMIN_SESSION_COOKIE]
+            item["path"] = "/api"
+            item["httponly"] = True
+            item["samesite"] = "Strict"
+            item["max-age"] = SESSION_TTL if session_token else 0
+            if self._browser_origin().startswith("https://"):
+                item["secure"] = True
+            self.send_header("Set-Cookie", item.OutputString())
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1084,18 +1089,21 @@ class SubscriptionHandler(BaseHTTPRequestHandler):
         self._json(status, {"error": code})
 
     def _authorized(self) -> bool:
-        value = self.headers.get("Authorization", "")
-        supplied = value[7:] if value.startswith("Bearer ") else ""
+        supplied = self._session_token()
         return bool(supplied) and (
-            hmac.compare_digest(supplied.encode("utf-8"), self.admin_token.encode("utf-8"))
+            (self.headers.get("Authorization") is not None
+             and hmac.compare_digest(supplied.encode("utf-8"), self.admin_token.encode("utf-8")))
             or bool(self.admin_auth and self.admin_auth.authorized(supplied))
         )
 
     def _require_admin(self) -> bool:
-        if self._authorized():
-            return True
-        self._error(HTTPStatus.UNAUTHORIZED, "admin_auth_required")
-        return False
+        if not self._authorized():
+            self._error(HTTPStatus.UNAUTHORIZED, "admin_auth_required")
+            return False
+        if self.command not in {"GET", "HEAD"} and self.headers.get("Authorization") is None and not self._same_origin():
+            self._error(HTTPStatus.FORBIDDEN, "admin_origin_required")
+            return False
+        return True
 
     def _body(self, limit: int = MAX_BODY) -> dict[str, Any]:
         raw_length = self.headers.get("Content-Length", "")
@@ -1131,6 +1139,9 @@ class SubscriptionHandler(BaseHTTPRequestHandler):
                 if self._require_admin():
                     self._json(HTTPStatus.OK, {"authenticated": True,
                                "username": self.admin_auth.username if self.admin_auth else "admin"})
+            elif path == "/api/subscription-template":
+                if self._require_admin():
+                    self._json(HTTPStatus.OK, self.store.subscription_template())
             elif path == "/api/servers":
                 if self._require_admin():
                     self._json(HTTPStatus.OK, {"items": self.store.list_servers()})
@@ -1197,6 +1208,10 @@ class SubscriptionHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.BAD_REQUEST, "invalid_request")
 
     def _login(self) -> None:
+        if ((self.headers.get("Origin") is not None and not self._same_origin())
+                or self.headers.get("Sec-Fetch-Site") == "cross-site"):
+            self._error(HTTPStatus.FORBIDDEN, "admin_origin_required")
+            return
         if self.admin_auth is None:
             self._error(HTTPStatus.NOT_FOUND, "auth_not_configured")
             return
@@ -1216,7 +1231,7 @@ class SubscriptionHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.BAD_REQUEST, "invalid_credentials")
             return
         self._json(HTTPStatus.OK, {"token": token, "username": self.admin_auth.username,
-                                 "expires_in": SESSION_TTL})
+                                 "expires_in": SESSION_TTL}, session_token=token)
 
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
@@ -1229,8 +1244,8 @@ class SubscriptionHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/auth/logout":
             if self.admin_auth:
-                self.admin_auth.logout(self.headers.get("Authorization", "")[7:])
-            self._json(HTTPStatus.OK, {"ok": True})
+                self.admin_auth.logout(self._session_token())
+            self._json(HTTPStatus.OK, {"ok": True}, session_token="")
             return
         try:
             material_match = re.fullmatch(r"/api/servers/([^/]+)/materials", path)
@@ -1262,7 +1277,7 @@ class SubscriptionHandler(BaseHTTPRequestHandler):
                 status = {'unknown server': HTTPStatus.NOT_FOUND, 'material_too_large': HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                           'material_quota_exceeded': HTTPStatus.CONFLICT}.get(str(exc), HTTPStatus.BAD_REQUEST)
             else:
-                status = HTTPStatus.CONFLICT if "already" in str(exc) or "unavailable" in str(exc) else HTTPStatus.BAD_REQUEST
+                status = HTTPStatus.CONFLICT if "already" in str(exc) or "unavailable" in str(exc) or "reload before saving" in str(exc) else HTTPStatus.BAD_REQUEST
             self._error(status, str(exc))
         except (OSError, UnicodeError, json.JSONDecodeError):
             self._error(HTTPStatus.BAD_REQUEST, "invalid_request")
@@ -1275,6 +1290,9 @@ class SubscriptionHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = self._body()
+            if path == "/api/subscription-template":
+                self._json(HTTPStatus.OK, self.store.save_subscription_template(payload))
+                return
             owner_match = re.fullmatch(r"/api/ips/([^/]+)/server", path)
             if owner_match:
                 self._json(HTTPStatus.OK, self.store.assign_ip_server(owner_match.group(1), payload.get("server_id")))
@@ -1288,7 +1306,7 @@ class SubscriptionHandler(BaseHTTPRequestHandler):
                 raise DomainError("invalid IP id")
             self._json(HTTPStatus.OK, self.store.bind(match.group(1), ip_id))
         except DomainError as exc:
-            status = HTTPStatus.CONFLICT if "already" in str(exc) or "unavailable" in str(exc) else HTTPStatus.BAD_REQUEST
+            status = HTTPStatus.CONFLICT if "already" in str(exc) or "unavailable" in str(exc) or "reload before saving" in str(exc) else HTTPStatus.BAD_REQUEST
             self._error(status, str(exc))
         except (OSError, UnicodeError, json.JSONDecodeError):
             self._error(HTTPStatus.BAD_REQUEST, "invalid_request")

@@ -21,6 +21,7 @@ import select
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 from urllib.parse import urlsplit
@@ -49,8 +50,12 @@ def private_document(path: Path, *, yaml_format=False):
 
 def validate_subscription(document, *, routing_profile=None):
     allowed = {'mixed-port', 'allow-lan', 'ipv6', 'mode', 'log-level', 'proxies',
-               'proxy-groups', 'rules', 'dns', 'profile', 'bind-address'}
+               'proxy-groups', 'rules', 'dns', 'profile', 'bind-address', 'tun',
+               'unified-delay', 'tcp-concurrent', 'find-process-mode', 'sniffer',
+               'geodata-mode', 'geo-auto-update', 'geox-url'}
     if not isinstance(document, dict) or set(document) - allowed:
+        raise ProbeError('unsupported_subscription_fields')
+    if 'tun' in document and document['tun'] != {'enable': False}:
         raise ProbeError('unsupported_subscription_fields')
     if document.get('bind-address', '127.0.0.1') != '127.0.0.1':
         raise ProbeError('loopback_bind_required')
@@ -97,26 +102,39 @@ def validate_subscription(document, *, routing_profile=None):
                       'DOMAIN-SUFFIX,clau.de,' + group,
                       'DOMAIN-SUFFIX,claudeusercontent.com,' + group,
                       'MATCH,' + group]
-    domestic_rules = strict_rules[:-1] + [
-        'DOMAIN-SUFFIX,codemaster.com.cn,DIRECT',
-        'DOMAIN-SUFFIX,codemao.cn,DIRECT',
-        'GEOIP,CN,DIRECT,no-resolve',
-        strict_rules[-1],
-    ]
     rules = document.get('rules')
-    if routing_profile is None:
-        if rules == strict_rules:
-            routing_profile = 'strict'
-        elif rules == domestic_rules:
-            routing_profile = 'domestic-direct'
-        else:
+    if (not isinstance(rules, list) or rules[:6] != strict_rules[:6]
+            or rules[-1:] != strict_rules[-1:] or any(not isinstance(rule, str) for rule in rules)):
+        raise ProbeError('unsafe_routing_rules')
+    # Use the same rule grammar as the template editor, with the reserved prefix/suffix above.
+    package_root = str(Path(__file__).resolve().parents[1])
+    if package_root not in sys.path:
+        sys.path.insert(0, package_root)
+    from server.subscription_template import DEFAULT_TEMPLATE, GROUP, validate_template
+    candidate = copy.deepcopy(DEFAULT_TEMPLATE)
+    candidate['rules'], candidate['domestic_direct_rules'] = [], []
+    direct_seen = False
+    for rule in rules[6:-1]:
+        fields = rule.split(',')
+        direct = len(fields) >= 3 and fields[2] == 'DIRECT'
+        if direct_seen and not direct:
             raise ProbeError('unsafe_routing_rules')
-    elif routing_profile == 'strict' and rules != strict_rules:
+        direct_seen = direct_seen or direct
+        if len(fields) >= 3 and fields[2] == group:
+            fields[2] = GROUP
+        candidate['domestic_direct_rules' if direct else 'rules'].append(','.join(fields))
+    if routing_profile is None:
+        routing_profile = 'domestic-direct' if direct_seen else 'strict'
+    if routing_profile not in {'strict', 'domestic-direct'} or (routing_profile == 'strict' and direct_seen):
         raise ProbeError('unsafe_routing_rules')
-    elif routing_profile == 'domestic-direct' and rules != domestic_rules:
-        raise ProbeError('unsafe_routing_rules')
-    elif routing_profile not in {'strict', 'domestic-direct'}:
-        raise ProbeError('unsafe_routing_rules')
+    for key in ('tun', 'unified-delay', 'tcp-concurrent', 'find-process-mode', 'sniffer',
+                'geodata-mode', 'geo-auto-update', 'geox-url'):
+        if key in document:
+            candidate['config'][key] = document[key]
+    try:
+        validate_template(candidate)
+    except ValueError:
+        raise ProbeError('unsafe_template_settings') from None
     dns = document.get('dns')
     dns_keys = {'enable', 'listen', 'ipv6', 'enhanced-mode', 'fake-ip-range',
                 'fake-ip-filter', 'default-nameserver', 'nameserver', 'respect-rules',
@@ -147,7 +165,8 @@ def validate_subscription(document, *, routing_profile=None):
             or dns.get('prefer-h3') is not False or dns.get('use-hosts') is not False
             or dns.get('use-system-hosts') is not False):
         raise ProbeError('fixed_route_doh_required')
-    if document.get('profile', {}) not in ({}, {'store-selected': True, 'store-fake-ip': True},
+    if document.get('profile', {}) not in ({}, {'store-selected': True}, {'store-selected': False},
+                                           {'store-selected': True, 'store-fake-ip': True},
                                            {'store-selected': False, 'store-fake-ip': False}):
         raise ProbeError('unsupported_profile')
     return copy.deepcopy(document)

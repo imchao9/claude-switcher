@@ -144,6 +144,12 @@ Linux 用户使用 `linux/` 下的 bash 版本。**开始之前必须先理解�
 - Linux 版：`linux/`（核心 `claude-switch.sh` / 保镖 `claude-bodyguard.sh` / 安装器 `install.sh`）
 - Web 版：`docs/` 下的 index.html/app.js/style.css（纯静态环境检测页，GitHub Pages 从 docs/ 发布）
 
+## 订阅后台线上发布
+
+用户要求将本项目的订阅后台、管理页面或绑定同步器“发布到线上 / 上线 / 部署”时，先读取本地技能 [`claude-switcher-deploy`](/Users/cm/.codex/skills/claude-switcher-deploy/SKILL.md)，按仓库 `.codex/release.yaml` 和 `deploy/README.md` 执行备份、工作区快照校验、目标机测试、发布与公网核验。技能安装在 `~/.codex/skills/claude-switcher-deploy/`；其他机器缺少该技能时，以仓库发布清单和部署文档恢复相同步骤，不猜测目标或执行首次安装器。
+
+当前清单明确使用已审核的 server 工作区快照，用户要求上线当前成果时可以直接打包发布；“上线”不自动包含 Git commit/push，也不授权更新维护者本机已安装版本。保留现有未提交改动，发布包排除数据库、认证、私密资料、缓存和本机输出。线上后台与 root 绑定同步器是独立代码包，相关 Python 依赖变化时须一并更新、核验同步收据。报告发布 ID、摘要、验证结果和回滚位置；不得只以代码修改或本地测试通过宣告上线成功。
+
 ## 维护者本机纪律（Agent 必须遵守）
 
 **除非维护者在当次对话中明确要求，否则不得更新/部署维护者本机的已安装版本。** 具体包括：

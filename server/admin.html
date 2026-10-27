@@ -84,6 +84,7 @@
         <button class="nav-item" type="button" data-view="import"><svg aria-hidden="true"><use href="#i-upload"/></svg>批量导入</button>
         <button class="nav-item" type="button" data-view="users"><svg aria-hidden="true"><use href="#i-users"/></svg>用户绑定</button>
         <button class="nav-item" type="button" data-view="delivery"><svg aria-hidden="true"><use href="#i-link"/></svg>订阅交付<span id="delivery-count" class="nav-count" hidden>0</span></button>
+        <button class="nav-item" type="button" data-view="template"><svg aria-hidden="true"><use href="#i-shield"/></svg>全局订阅模板</button>
         <button class="nav-item" type="button" data-view="servers"><svg aria-hidden="true"><use href="#i-server"/></svg>服务器管理</button>
       </nav>
       <div class="sidebar-bottom">CLAUDE SWITCHER<strong>一人一 IP，独立订阅管理</strong><button id="mobile-logout" class="mobile-logout" type="button">退出当前账号<svg aria-hidden="true"><use href="#i-arrow"/></svg></button></div>
@@ -125,11 +126,26 @@
         <section id="view-users" aria-labelledby="page-title" hidden>
           <div class="card"><div class="card-header"><div><h2>用户绑定管理</h2><p>每位用户独立绑定一个出口 IP</p></div><button type="button" class="primary-add" data-dialog="user-dialog"><svg aria-hidden="true"><use href="#i-plus"/></svg>创建用户</button></div><div class="table-toolbar"><span id="user-count" class="table-count">共 0 位用户</span><span class="table-count">重置只更换订阅下载链接，已下载节点仍可使用</span></div><div id="users" class="table-scroll"></div></div>
         </section>
+        <section id="view-template" aria-labelledby="page-title" hidden>
+          <div class="card"><div class="card-header"><div><h2>Clash / Mihomo 全局模板</h2><p>统一管理公共配置，节点由用户绑定的入口自动生成</p></div><span id="template-status" class="table-count" role="status">尚未加载</span></div>
+            <form id="template-form" class="card-body">
+              <p class="field-help">保存后，所有用户下次刷新 Clash 订阅时应用新模板，现有订阅地址继续有效。模板管理客户端配置；住宅出口请在用户管理中绑定，由独立同步器应用到 3X-UI。WS + TLS 节点由服务器入口自动生成；小火箭订阅只提供节点参数。</p>
+              <label for="template-editor">公共模板（JSON）</label>
+              <p class="field-help">config 管理端口、DNS、嗅探等设置；rules 管理代理与拦截规则；domestic_direct_rules 仅在地址带 routing=domestic-direct 时启用。默认严格策略。AI 保护规则始终置顶，默认流量进入受管代理组。请勿填入节点、账号或凭据。</p>
+              <textarea id="template-editor" spellcheck="false" aria-describedby="template-help" style="min-height:480px" disabled></textarea>
+              <p id="template-help" class="field-help">代理组固定为 CLAUDE-SWITCHER。DNS 仅监听本机，业务 DoH 经受管组，入口解析单独直连。TUN 由客户端管理。模板中的本地代理端口默认 7897，客户端全局设置可能覆盖它。</p>
+              <div class="toolbar-actions" style="margin-top:18px;flex-wrap:wrap"><button id="template-save" type="submit" disabled>保存全局模板</button><button id="template-reload" class="secondary" type="button">重新加载已保存模板</button></div>
+              <div id="template-message" class="message" role="status" aria-live="polite"></div>
+              <label for="template-profile">已保存模板预览</label><select id="template-profile"><option value="strict">严格策略（默认）</option><option value="domestic-direct">国内直连（需 routing=domestic-direct）</option></select>
+              <p class="field-help">预览使用不可连接的示例节点，显示最近一次保存的结果。</p><textarea id="template-preview" aria-label="订阅 YAML 预览" readonly spellcheck="false" style="min-height:320px"></textarea>
+            </form>
+          </div>
+        </section>
         <section id="view-servers" aria-labelledby="page-title" hidden>
-          <div class="card"><div class="card-header"><div><h2>全部服务器</h2><p>登记已安装的 Reality / TLS 入口，管理住宅出口</p></div><button type="button" class="primary-add" data-dialog="server-dialog"><svg aria-hidden="true"><use href="#i-plus"/></svg>添加服务器</button></div><div class="table-toolbar"><span id="server-count" class="table-count">共 0 台服务器</span><span class="table-count">状态控制分配与订阅访问</span></div><div id="servers" class="table-scroll"></div><div class="card-body"><p class="field-help">3X-UI 同步状态来自后台最近一次核验。已配置的自动同步约每 15 秒检查一次，绑定或停用后请等待“已应用到 3X-UI”。“未配置自动同步”时仍需人工处理。导出资料仅供参考，下载不表示已应用。Reality 合并资料含住宅代理凭据，请私密保存。</p></div></div>
+          <div class="card"><div class="card-header"><div><h2>全部服务器</h2><p>登记已安装的 WS / TLS 入口，管理住宅出口</p></div><button type="button" class="primary-add" data-dialog="server-dialog"><svg aria-hidden="true"><use href="#i-plus"/></svg>添加服务器</button></div><div class="table-toolbar"><span id="server-count" class="table-count">共 0 台服务器</span><span class="table-count">状态控制分配与订阅访问</span></div><div id="servers" class="table-scroll"></div><div class="card-body"><p class="field-help">本后台管理用户与住宅绑定，独立同步器通过 3X-UI 更新身份、出口和路由，由 Xray 执行转发。同步器每轮结束后等待约 15 秒再检查；绑定或停用后，请等待“已应用到 3X-UI”，再核验实际出口。新增服务器需单独配置同步。</p><p class="field-help">受管身份和路由请通过本后台修改，避免与 3X-UI 手动编辑冲突。“未配置自动同步”时仍需人工处理；导出资料仅供参考，下载不表示已应用。合并资料含住宅代理凭据，请私密保存。</p></div></div>
         </section>
         <section id="batch-subscriptions" aria-labelledby="subscriptions-title" hidden>
-          <div class="delivery-banner"><svg aria-hidden="true"><use href="#i-shield"/></svg><div><h3>订阅地址已由后台安全保存</h3><p>每个地址只包含该用户的受管入口。配置备用入口后，两条路线仍连接同一专属住宅出口。历史未归属资源保留原直连方式。刷新、重新登录或后台重启后可再次查阅。历史地址需粘贴已保存的链接恢复；没有旧链接时可明确重置，原链接随即失效。</p></div></div>
+          <div class="delivery-banner"><svg aria-hidden="true"><use href="#i-shield"/></svg><div><h3>订阅地址已由后台安全保存</h3><p>每个地址只包含该用户的受管入口。WS 节点连接该用户的专属住宅出口，分别提供 Clash 与小火箭格式。历史未归属资源保留原直连方式。刷新、重新登录或后台重启后可再次查阅。历史地址需粘贴已保存的链接恢复；没有旧链接时可明确重置，原链接随即失效。</p></div></div>
           <div class="card"><div class="card-header delivery-header"><div><h2 id="subscriptions-title">独立订阅地址</h2><p id="delivery-summary">创建用户或批量导入后，在这里交付订阅</p></div><div class="toolbar-actions"><button id="open-convert-subscription" type="button" class="secondary">恢复已有地址</button><button id="copy-subscriptions" type="button" class="secondary" disabled><svg aria-hidden="true"><use href="#i-copy"/></svg>复制全部</button></div></div><div class="card-body"><p class="field-help">分别复制 Clash 或 Shadowrocket（小火箭）格式的地址。云入口到专属住宅出口的链路由服务端处理，用户无需手工配置链式代理。节点订阅不会配置小火箭的全局路由、UDP 或 DNS。请将 Global Routing（全局路由）设为 Proxy（代理），选择分配给自己的节点，并开启 VPN。仍需在设备上核验实际出口、UDP 和 DNS 行为。</p></div><div class="table-toolbar"><div class="search-box"><input id="subscription-search" aria-label="搜索订阅" placeholder="搜索用户名称、ID、IP 或服务器"></div></div><div id="subscription-links" class="table-scroll"></div><div id="subscription-message" class="message inline-message" role="status" aria-live="polite"></div></div>
         </section>
       </main>
@@ -137,15 +153,16 @@
     <dialog id="convert-subscription-dialog" aria-labelledby="convert-subscription-title"><div class="dialog-header"><h2 id="convert-subscription-title">恢复已有地址</h2><button type="button" class="ghost icon-button" data-close="convert-subscription-dialog" aria-label="关闭订阅地址转换"><svg aria-hidden="true"><use href="#i-close"/></svg></button></div><form id="convert-subscription-form" class="dialog-body"><p class="field-help">粘贴本后台之前生成的有效本地或公网订阅地址，将原令牌保存到后台。个人令牌与原地址继续有效。</p><label for="convert-subscription-url">已保存的订阅地址</label><input id="convert-subscription-url" name="url" type="password" required maxlength="2048" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="粘贴本后台生成的订阅地址"><p class="dialog-note">不支持其他订阅服务的地址。转换后的公网地址仍需完成后台部署和域名接入。关闭窗口或退出登录会清空此处内容。</p><div id="convert-subscription-message" class="message" role="status" aria-live="polite"></div><div class="dialog-footer"><button type="button" class="secondary" data-close="convert-subscription-dialog">取消</button><button id="convert-subscription-submit" type="submit">恢复并交付</button></div></form></dialog>
     <dialog id="ip-dialog" aria-labelledby="ip-dialog-title"><div class="dialog-header"><h2 id="ip-dialog-title">添加或更新 IP</h2><button type="button" class="ghost icon-button" data-close="ip-dialog" aria-label="关闭 IP 表单"><svg aria-hidden="true"><use href="#i-close"/></svg></button></div><form id="ip-form" class="dialog-body"><label for="ip-id">资源 ID</label><input id="ip-id" name="id" required pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" placeholder="例如 us-node-01"><label for="ip-server">所属服务器</label><select id="ip-server" name="server_id" required><option value="">请选择启用的服务器</option></select><p id="ip-server-help" class="field-help server-empty-help" hidden>请先<button type="button" class="link-button" data-server-manage="ip-dialog">添加或启用服务器</button></p><div class="form-row"><div><label for="ip-address">住宅出口公网 IP</label><input id="ip-address" name="address" required placeholder="请输入公网 IP"></div><div><label for="ip-port">端口</label><input id="ip-port" name="port" type="number" value="443" min="1" max="65535" required></div></div><div class="form-row"><div><label for="ip-protocol">协议</label><select id="ip-protocol" name="protocol"><option value="socks5">SOCKS5</option><option value="http">HTTP</option></select></div><div><label for="ip-name">显示名称</label><input id="ip-name" name="name" placeholder="例如 美国独立出口"></div></div><label for="ip-username">住宅代理用户名（可选）</label><input id="ip-username" name="username" autocomplete="off"><label for="ip-password">住宅代理密码（可选）</label><input id="ip-password" name="password" type="password" autocomplete="off"><p class="dialog-note">新归属资源仅支持住宅 SOCKS5 / HTTP 上游。使用已有资源 ID 会更新配置，请填写完整参数。入口未配置时可先登记资源，完成入口配置后才能分配用户。</p><div id="ip-form-message" class="message" role="status" aria-live="polite"></div><div class="dialog-footer"><button type="button" class="secondary" data-close="ip-dialog">取消</button><button type="submit">保存 IP</button></div></form></dialog>
     <dialog id="server-dialog" aria-labelledby="server-dialog-title"><div class="dialog-header"><h2 id="server-dialog-title">添加服务器</h2><button type="button" class="ghost icon-button" data-close="server-dialog" aria-label="关闭服务器表单"><svg aria-hidden="true"><use href="#i-close"/></svg></button></div><form id="server-form" class="dialog-body">
-      <p class="field-help">登记已安装的入口。此页面只保存参数，不安装或重装远端服务。可使用只读检查工具生成公开参数 JSON，再导入表单核对并保存。</p>
+      <p class="field-help">登记已安装的入口。此页面只保存参数，不安装或重装远端服务。请核对入口的公开连接参数；历史 Reality 检查工具生成的 JSON 仅用于查看原配置。</p>
       <label for="server-profile-file">导入公开参数 JSON（可选）</label><input id="server-profile-file" type="file" accept=".json,application/json"><p class="field-help">只填充本表单，点击“保存服务器”后才会写入。仅接受公开入口参数，不接受私钥或凭据。</p>
       <label for="server-id">服务器 ID</label><input id="server-id" name="id" required pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" placeholder="例如 server-us-01"><label for="server-name">显示名称</label><input id="server-name" name="name" required maxlength="120" placeholder="例如 美国服务器"><label for="server-host">云服务器入口地址</label><input id="server-host" name="host" required placeholder="例如 server.example.com"><label for="server-region">地区</label><input id="server-region" name="region" maxlength="120" placeholder="例如 美国"><label for="server-status">分配状态</label><select id="server-status" name="status"><option value="active">已启用</option><option value="disabled">已停用</option></select>
       <label class="checkbox-label" for="gateway-enabled"><input id="gateway-enabled" type="checkbox" aria-controls="gateway-fields">登记已安装入口</label>
-      <fieldset id="gateway-fields" class="gateway-fields" hidden disabled><legend>已有入口参数</legend><label for="gateway-kind">入口类型</label><select id="gateway-kind" name="gateway_kind"><option value="xray-vless-reality">VLESS + Reality</option><option value="xray-vless-tls">VLESS + TLS（兼容已有配置）</option></select><label for="gateway-port">入口端口</label><input id="gateway-port" name="gateway_port" type="number" value="443" min="1" max="65535"><label for="gateway-server-name">服务名称 / SNI</label><input id="gateway-server-name" name="gateway_server_name" placeholder="例如 gateway.example.com" autocomplete="off">
-        <fieldset id="gateway-reality-fields" class="gateway-fields"><legend>Reality 公开参数</legend><label for="gateway-public-key">Reality 公钥</label><input id="gateway-public-key" name="gateway_public_key" pattern="[A-Za-z0-9_-]{43}" maxlength="43" autocomplete="off"><label for="gateway-short-id">Short ID</label><input id="gateway-short-id" name="gateway_short_id" pattern="(?:[A-Fa-f0-9]{2}){1,8}" maxlength="16" autocomplete="off"><label for="gateway-inbound-tag">已有 3x-ui 入站 Tag</label><input id="gateway-inbound-tag" name="gateway_inbound_tag" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" maxlength="64" autocomplete="off"><label for="gateway-mlkem">Reality ML-KEM 支持</label><select id="gateway-mlkem" name="gateway_mlkem"><option value="">未声明（保留客户端默认行为）</option><option value="true">启用</option><option value="false">禁用</option></select><p class="field-help">仅按这台服务器已核验的能力填写。Flow 固定为 xtls-rprx-vision，客户端指纹固定为 chrome。保留远端 Reality 私钥。</p>
+      <fieldset id="gateway-fields" class="gateway-fields" hidden disabled><legend>已有入口参数</legend><label for="gateway-kind">入口类型</label><select id="gateway-kind" name="gateway_kind"><option value="xray-vless-ws">VLESS + WS + TLS</option><option value="xray-vless-reality" hidden>Reality（历史配置）</option><option value="xray-vless-tls" hidden>VLESS + TLS（历史配置）</option></select><label id="gateway-port-label" for="gateway-port">入口端口</label><input id="gateway-port" name="gateway_port" type="number" value="443" min="1" max="65535"><label id="gateway-server-name-label" for="gateway-server-name">服务名称 / SNI</label><input id="gateway-server-name" name="gateway_server_name" placeholder="例如 gateway.example.com" autocomplete="off">
+        <fieldset id="gateway-reality-fields" class="gateway-fields"><legend>Reality 公开参数</legend><label for="gateway-public-key">Reality 公钥</label><input id="gateway-public-key" name="gateway_public_key" pattern="[A-Za-z0-9_-]{43}" maxlength="43" autocomplete="off"><label for="gateway-short-id">Short ID</label><input id="gateway-short-id" name="gateway_short_id" pattern="(?:[A-Fa-f0-9]{2}){1,8}" maxlength="16" autocomplete="off"><label for="gateway-inbound-tag">已有 3X-UI 入站 Tag</label><input id="gateway-inbound-tag" name="gateway_inbound_tag" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" maxlength="64" autocomplete="off"><label for="gateway-mlkem">Reality ML-KEM 支持</label><select id="gateway-mlkem" name="gateway_mlkem"><option value="">未声明（保留客户端默认行为）</option><option value="true">启用</option><option value="false">禁用</option></select><p class="field-help">仅按这台服务器已核验的能力填写。Flow 固定为 xtls-rprx-vision，客户端指纹固定为 chrome。保留远端 Reality 私钥。</p>
           <label class="checkbox-label" for="gateway-ws-enabled"><input id="gateway-ws-enabled" type="checkbox" aria-controls="gateway-ws-fields">登记受管 WS + TLS 备用入口</label>
-          <fieldset id="gateway-ws-fields" class="gateway-fields" hidden disabled><legend>WS 备用公开参数</legend><label for="gateway-ws-address">公开连接地址</label><input id="gateway-ws-address" name="gateway_ws_address" maxlength="253" placeholder="例如 backup.example.com" autocomplete="off"><label for="gateway-ws-port">公开 TLS 端口</label><input id="gateway-ws-port" name="gateway_ws_port" type="number" value="443" min="1" max="65535"><label for="gateway-ws-server-name">TLS 验证名称 / SNI</label><input id="gateway-ws-server-name" name="gateway_ws_server_name" maxlength="253" autocomplete="off"><label for="gateway-ws-host">WebSocket Host</label><input id="gateway-ws-host" name="gateway_ws_host" maxlength="253" autocomplete="off"><label for="gateway-ws-path">WebSocket 路径</label><input id="gateway-ws-path" name="gateway_ws_path" maxlength="1024" placeholder="/managed-ws" autocomplete="off"><label for="gateway-ws-inbound-tag">受管 WS 入站 Tag</label><input id="gateway-ws-inbound-tag" name="gateway_ws_inbound_tag" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" maxlength="64" autocomplete="off"><label for="gateway-ws-tls-termination">TLS 终止位置</label><select id="gateway-ws-tls-termination" name="gateway_ws_tls_termination"><option value="xray">Xray 入站</option><option value="external">外部反向代理</option></select><p class="field-help">备用身份须由 3X-UI 同步管理，与主入口使用同一住宅出口。外部 TLS 的明文源站必须只监听 loopback。保存公开参数不表示同步、证书或连接已验证，不会自动接管现有 WS。</p></fieldset>
+
         </fieldset>
+          <fieldset id="gateway-ws-fields" class="gateway-fields" hidden disabled><legend>WS + TLS 公开参数</legend><label for="gateway-ws-address">公开连接地址</label><input id="gateway-ws-address" name="gateway_ws_address" maxlength="253" placeholder="例如 sub.610247.xyz" autocomplete="off"><label for="gateway-ws-port">公开 TLS 端口</label><input id="gateway-ws-port" name="gateway_ws_port" type="number" value="443" min="1" max="65535"><label for="gateway-ws-server-name">TLS 验证名称 / SNI</label><input id="gateway-ws-server-name" name="gateway_ws_server_name" maxlength="253" autocomplete="off"><label for="gateway-ws-host">WebSocket Host</label><input id="gateway-ws-host" name="gateway_ws_host" maxlength="253" autocomplete="off"><label for="gateway-ws-path">WebSocket 路径</label><input id="gateway-ws-path" name="gateway_ws_path" maxlength="1024" placeholder="/managed-ws" autocomplete="off"><label for="gateway-ws-inbound-tag">受管 WS 入站 Tag</label><input id="gateway-ws-inbound-tag" name="gateway_ws_inbound_tag" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" maxlength="64" autocomplete="off"><label for="gateway-ws-tls-termination">TLS 终止位置</label><select id="gateway-ws-tls-termination" name="gateway_ws_tls_termination"><option value="xray">Xray 入站</option><option value="external">外部反向代理</option></select><p class="field-help">每位用户使用独立 WS 身份，连接其绑定的住宅出口。外部 TLS 的明文源站必须只监听 loopback。保存公开参数不表示同步、证书或连接已验证，不会自动接管现有 WS。</p></fieldset>
         <fieldset id="gateway-tls-fields" class="gateway-fields" hidden disabled><legend>TLS 已有证书路径</legend><label for="gateway-certificate-file">云服务器证书绝对路径</label><input id="gateway-certificate-file" name="gateway_certificate_file" pattern="/.*" placeholder="/etc/xray/tls/fullchain.pem" autocomplete="off"><label for="gateway-key-file">云服务器私钥绝对路径</label><input id="gateway-key-file" name="gateway_key_file" pattern="/.*" placeholder="/etc/xray/tls/privkey.pem" autocomplete="off"><p class="field-help">仅填写远端文件路径，不上传或读取证书、私钥内容。</p></fieldset>
       </fieldset><p class="dialog-note">保存后请在服务器列表查看 3X-UI 同步状态。未配置自动同步的服务器仍需人工处理。导出资料仅供参考，下载不表示已应用。</p><div id="server-form-message" class="message" role="status" aria-live="polite"></div><div class="dialog-footer"><button type="button" class="secondary" data-close="server-dialog">取消</button><button type="submit">保存服务器</button></div></form></dialog>
     <dialog id="materials-dialog" aria-labelledby="materials-dialog-title"><div class="dialog-header"><div><h2 id="materials-dialog-title">安装资料</h2><p id="materials-server" class="field-help"></p></div><button type="button" class="ghost icon-button" data-close="materials-dialog" aria-label="关闭安装资料"><svg aria-hidden="true"><use href="#i-close"/></svg></button></div><div class="dialog-body"><p class="field-help">私密保存并下载已有安装资料。HTML 和 ZIP 仅作为附件保存，不在页面预览或执行。每个文件最多 5 MiB，每台服务器最多 20 个文件、共 25 MiB，相同内容不会重复保存。</p><label for="materials-files">选择安装资料</label><input id="materials-files" type="file" multiple accept=".zip,.md,.html,.tsv"><p id="materials-selection" class="field-help"></p><div class="import-actions"><button id="materials-upload" type="button" disabled>上传所选资料</button><button id="materials-refresh" type="button" class="secondary">刷新列表</button></div><div id="materials-message" class="message" role="status" aria-live="polite"></div><div id="materials-list" class="materials-list"></div><div class="dialog-footer"><button type="button" class="secondary" data-close="materials-dialog">关闭</button></div></div></dialog>
@@ -162,10 +179,13 @@
       ips:{id:'view-ips',name:'IP 资源',title:'IP 资源',eyebrow:'IP RESOURCES',description:'管理代理资源，为每位用户分配独立出口。'},
       import:{id:'view-import',name:'批量导入',title:'批量导入',eyebrow:'BULK IMPORT',description:'导入代理列表，一次完成入库、用户绑定与订阅生成。'},
       users:{id:'view-users',name:'用户绑定',title:'用户绑定',eyebrow:'USER MANAGEMENT',description:'维护用户与独立 IP 的对应关系。'},
+      template:{id:'view-template',name:'全局订阅模板',title:'全局订阅模板',eyebrow:'SUBSCRIPTION TEMPLATE',description:'一次修改公共配置，在所有 Clash 订阅刷新后生效。'},
       servers:{id:'view-servers',name:'服务器管理',title:'服务器管理',eyebrow:'SERVER MANAGEMENT',description:'登记已安装入口参数，管理所属住宅出口与私密资料。'},
       delivery:{id:'batch-subscriptions',name:'订阅交付',title:'订阅交付',eyebrow:'SUBSCRIPTION DELIVERY',description:'查阅已保存的双格式订阅，交付给对应用户。'}
     };
+    let templateState=null,templateGeneration=0,templateBusy=false;
     let currentView = 'overview';
+    const COOKIE_SESSION = 'browser-cookie-session';
     let authState = {phase:'signed-out',token:'',username:''};
     let ips = [], users = [], servers = [], generatedSubscriptions = [];
     let ownerIpId = '';
@@ -205,6 +225,7 @@
     function showView(name,focus=false) {
       if (!views[name]) return;
       currentView=name;
+      if(name==='template'&&!templateState&&!templateBusy)loadTemplate();
       for (const [key,view] of Object.entries(views)) byId(view.id).hidden=key!==name;
       document.querySelectorAll('.nav-item').forEach(button=>{
         if (button.dataset.view===name) button.setAttribute('aria-current','page');
@@ -244,6 +265,7 @@
     }
     function signedOut(notice='已退出登录。') {
       stopIntegrationPolling();integrations.clear();
+      templateGeneration++;templateState=null;templateBusy=false;byId('template-editor').value='';byId('template-preview').value='';byId('template-editor').disabled=true;byId('template-save').disabled=true;byId('template-reload').disabled=false;byId('template-message').textContent='';byId('template-status').textContent='尚未加载';
       authGeneration++;loadGeneration++;authState={phase:'signed-out',token:'',username:''};
       clearConversion();clearMaterials();serverFormGeneration++;byId('server-profile-file').value='';
       document.querySelectorAll('dialog[open]').forEach(dialog=>dialog.close());
@@ -258,7 +280,23 @@
       renderServerChoices();renderServers();renderSubscriptions();renderIps();renderUsers();renderOverview();connection(false);showView('overview');msg(notice);
     }
     const errorMessage = error => ({
+      'admin_origin_required':'请求来源验证失败，请从管理页面重新操作。',
       'user is unavailable':'用户已停用或没有可用绑定，请刷新数据后重试。',
+      'invalid subscription template':'模板结构无效，需要 config、rules 和 domestic_direct_rules。',
+      'invalid template fields':'配置字段不完整或含不支持的字段，请重新加载模板后修改。',
+      'invalid template field type':'模板字段类型错误，请保留数字、布尔值和列表的格式。',
+      'invalid template port':'模板端口必须在 1–65535 之间。',
+      'invalid template DNS address':'DNS 必须监听本机有效端口，并使用 IPv4 fake-IP 网段。',
+      'invalid template DNS policy':'DNS 需要启用 fake-IP 和规则路由，并禁用 IPv6、H3 与 hosts。',
+      'invalid template DNS route':'DNS 需使用 IP 地址 DoH，业务解析经 CLAUDE-SWITCHER，入口解析经 DIRECT。',
+      'template DNS requires IP-address DoH':'DNS 服务器需使用 IP 地址 DoH。',
+      'template requires loopback rule mode with IPv6 and TUN disabled':'模板需监听本机、使用 rule 模式，并关闭 LAN、IPv6 和 TUN。',
+      'invalid template geodata URL':'Geo 数据地址必须是无账号凭据的 HTTPS 地址。',
+      'invalid template sniffer port':'嗅探端口必须在 1–65535 之间。',
+      'invalid template log level':'日志级别需为 silent、error、warning、info 或 debug。',
+      'invalid template process mode':'进程识别模式需为 always、strict 或 off。',
+      'invalid template rule':'规则格式或目标无效；公共规则使用 CLAUDE-SWITCHER / REJECT，国内规则使用 DIRECT。',
+      'subscription template changed; reload before saving':'模板已被其他管理员修改，请保留草稿，重新加载后合并。',
       'invalid gateway configuration':'入口参数无效，请检查入口类型、端口、SNI 和该类型所需的公开参数或远程路径。',
       'gateway is unavailable':'云入口未配置或服务器已停用，请配置并启用入口后重试。',
       'unsupported gateway upstream':'云入口仅支持 SOCKS5 / HTTP 住宅上游。',
@@ -270,26 +308,74 @@
     const api = async (path,options={}) => {
       const session=sessionSnapshot(),requestToken=session.token;
       const {responseType,...fetchOptions}=options;
-      const headers=Object.assign({'Authorization':'Bearer '+requestToken},options.body?{'Content-Type':'application/json'}:{},options.headers||{});
-      const response=await fetch(path,Object.assign({},fetchOptions,{headers,credentials:'omit'}));
+      const headers=Object.assign(requestToken===COOKIE_SESSION?{}:{'Authorization':'Bearer '+requestToken},options.body?{'Content-Type':'application/json'}:{},options.headers||{});
+      const response=await fetch(path,Object.assign({},fetchOptions,{headers,credentials:'same-origin'}));
       const data=response.ok&&responseType==='blob'?await response.blob():await response.json().catch(()=>({error:'invalid_response'}));
       if (!sessionCurrent(session)) throw new Error('登录状态已变化，请重新操作。');
       if (response.status===401) {signedOut('登录已失效，请重新登录。');throw new Error('登录已失效，请重新登录。');}
       if (!response.ok) throw new Error(errorMessage(data.error)||('HTTP '+response.status));
       return data;
     };
+    function renderTemplate(data) {
+      templateState=data;byId('template-editor').value=JSON.stringify(data.template,null,2);
+      byId('template-preview').value=data.previews[byId('template-profile').value];
+      byId('template-status').textContent='已保存版本 '+data.revision.slice(0,8);
+      byId('template-editor').disabled=false;
+    }
+    async function loadTemplate() {
+      if(templateBusy)return;
+      const session=sessionSnapshot(),generation=++templateGeneration;
+      templateBusy=true;byId('template-save').disabled=true;byId('template-reload').disabled=true;
+      byId('template-message').textContent='正在加载模板…';
+      try {const data=await api('/api/subscription-template',{cache:'no-store'});
+        if(!sessionCurrent(session)||generation!==templateGeneration)return;
+        renderTemplate(data);byId('template-message').textContent='已加载保存的模板。';
+      } catch(error) {if(sessionCurrent(session)&&generation===templateGeneration)byId('template-message').textContent=error.message;}
+      finally {if(sessionCurrent(session)&&generation===templateGeneration){templateBusy=false;byId('template-save').disabled=!templateState;byId('template-reload').disabled=false;}}
+    }
+    byId('template-profile').addEventListener('change',()=>{if(templateState)byId('template-preview').value=templateState.previews[byId('template-profile').value];});
+    byId('template-editor').addEventListener('input',()=>{byId('template-status').textContent='有未保存修改';});
+    byId('template-reload').addEventListener('click',loadTemplate);
+    byId('template-form').addEventListener('submit',async event=>{
+      event.preventDefault();if(templateBusy||!templateState)return;
+      const session=sessionSnapshot(),generation=++templateGeneration;
+      let template;try{template=JSON.parse(byId('template-editor').value);}catch{byId('template-message').textContent='JSON 格式无效，请检查引号、逗号和括号。';return;}
+      templateBusy=true;byId('template-save').disabled=true;byId('template-reload').disabled=true;byId('template-editor').disabled=true;
+      byId('template-message').textContent='正在保存…';
+      try {const data=await api('/api/subscription-template',{method:'PUT',body:JSON.stringify({template,revision:templateState.revision})});
+        if(!sessionCurrent(session)||generation!==templateGeneration)return;
+        renderTemplate(data);byId('template-message').textContent='全局模板已保存，所有用户下次刷新 Clash 订阅时生效。';
+      } catch(error) {if(sessionCurrent(session)&&generation===templateGeneration)byId('template-message').textContent=error.message;}
+      finally {if(sessionCurrent(session)&&generation===templateGeneration){templateBusy=false;byId('template-save').disabled=false;byId('template-reload').disabled=false;byId('template-editor').disabled=false;}}
+    });
+    function signedIn(username) {
+      authState={phase:'signed-in',token:COOKIE_SESSION,username};byId('admin-password').value='';
+      byId('login-screen').hidden=true;byId('session-controls').hidden=false;byId('admin-panel').hidden=false;byId('session-username').textContent=username;
+      showView('overview');
+    }
+    async function restoreSession() {
+      const generation=++authGeneration;
+      authState={phase:'restoring',token:'',username:''};byId('login').disabled=true;
+      try {
+        const response=await fetch('/api/auth/session',{credentials:'same-origin',cache:'no-store'});
+        const data=await response.json();
+        if(generation!==authGeneration)return;
+        if(response.status===401){signedOut('');return;}
+        if(!response.ok||data.authenticated!==true||typeof data.username!=='string')throw new Error('登录状态验证失败，请重新登录。');
+        signedIn(data.username);await load();
+      } catch(error) {if(generation===authGeneration)signedOut(error.message||'登录状态验证失败，请重新登录。');}
+      finally {if(generation===authGeneration||authState.phase==='signed-out')byId('login').disabled=false;}
+    }
     byId('login-form').addEventListener('submit',async event=>{
       event.preventDefault();if(authState.phase==='signing-in')return;
       const loginGeneration=++authGeneration;loadGeneration++;authState={phase:'signing-in',token:'',username:''};byId('login').disabled=true;msg('正在登录…');
       try {
-        const response=await fetch('/api/auth/login',{method:'POST',credentials:'omit',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:byId('admin-username').value.trim(),password:byId('admin-password').value})});
+        const response=await fetch('/api/auth/login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:byId('admin-username').value.trim(),password:byId('admin-password').value})});
         const data=await response.json();
         if(loginGeneration!==authGeneration)return;
         if (!response.ok) throw new Error(({invalid_credentials:'账号或密码错误。',too_many_attempts:'尝试次数过多，请稍后重试。',auth_not_configured:'服务尚未配置管理员账号。'}[data.error])||'登录失败，请检查本地服务。');
         if(typeof data.token!=='string'||!data.token||typeof data.username!=='string')throw new Error('登录响应无效。');
-        authState={phase:'signed-in',token:data.token,username:data.username};byId('admin-password').value='';
-        byId('login-screen').hidden=true;byId('session-controls').hidden=false;byId('admin-panel').hidden=false;byId('session-username').textContent=data.username;
-        showView('overview');await load();
+        signedIn(data.username);await load();
       }catch(error){if(loginGeneration===authGeneration)signedOut(error.message||'登录失败，请检查本地服务。');}finally{if(loginGeneration===authGeneration||authState.phase==='signed-out')byId('login').disabled=false;}
     });
     async function logout() {
@@ -297,7 +383,7 @@
       byId('logout').disabled=true;byId('mobile-logout').disabled=true;
       let notice='已退出登录。';
       try{
-        if(previousToken){const response=await fetch('/api/auth/logout',{method:'POST',credentials:'omit',headers:{'Authorization':'Bearer '+previousToken,'Content-Type':'application/json'},body:'{}'});if(!response.ok&&response.status!==401)throw new Error('logout_unconfirmed');}
+        if(previousToken){const response=await fetch('/api/auth/logout',{method:'POST',credentials:'same-origin',headers:Object.assign({'Content-Type':'application/json'},previousToken===COOKIE_SESSION?{}:{'Authorization':'Bearer '+previousToken}),body:'{}'});if(!response.ok&&response.status!==401)throw new Error('logout_unconfirmed');}
       }catch{notice='当前页面已退出，服务端退出未确认。';}
       finally{if(authState.phase==='signed-out'&&!token())msg(notice);byId('logout').disabled=false;byId('mobile-logout').disabled=false;}
     }
@@ -413,6 +499,7 @@
     const activeOwner = ip => hasOwner(ip) && servers.some(server=>server.id===ip.server_id&&gatewayReady(server));
     const allocatableIp = ip => ip?.status==='available' && supportedUpstream(ip) && activeOwner(ip);
     const gatewayKinds={
+      'xray-vless-ws':{fields:['port','server_name'],section:'gateway-ws-fields',ws:true},
       'xray-vless-reality':{fields:['port','server_name','public_key','short_id','inbound_tag'],section:'gateway-reality-fields',flow:'xtls-rprx-vision'},
       'xray-vless-tls':{fields:['port','server_name','certificate_file','key_file'],section:'gateway-tls-fields'}
     };
@@ -424,21 +511,21 @@
         const section=byId(config.section),active=enabled&&kind===key;section.hidden=kind!==key;section.disabled=!active;
         for(const field of config.fields.filter(field=>!['port','server_name'].includes(field)))byId('gateway-'+field.replaceAll('_','-')).required=active;
       }
-      const wsActive=enabled&&kind==='xray-vless-reality'&&byId('gateway-ws-enabled').checked;
+      const wsActive=enabled&&(kind==='xray-vless-ws'||kind==='xray-vless-reality'&&byId('gateway-ws-enabled').checked);
       byId('gateway-ws-fields').hidden=!wsActive;byId('gateway-ws-fields').disabled=!wsActive;
       for(const field of wsFields)byId('gateway-ws-'+field.replaceAll('_','-')).required=wsActive;
-      for(const key of ['port','server-name'])byId('gateway-'+key).required=enabled;
+      for(const key of ['port','server-name']){const control=byId('gateway-'+key);control.required=enabled&&kind!=='xray-vless-ws';control.disabled=kind==='xray-vless-ws';control.hidden=kind==='xray-vless-ws';byId('gateway-'+key+'-label').hidden=kind==='xray-vless-ws';}
     }
     byId('gateway-enabled').addEventListener('change',updateGatewayFields);
     byId('gateway-kind').addEventListener('change',updateGatewayFields);
     byId('gateway-ws-enabled').addEventListener('change',updateGatewayFields);
     function fillServerForm(server){
       for(const key of ['id','name','host','region','status'])byId('server-'+key).value=server[key]??(key==='status'?'active':'');
-      byId('gateway-enabled').checked=Boolean(server.gateway);byId('gateway-kind').value=server.gateway?.kind||'xray-vless-reality';
+      byId('gateway-enabled').checked=Boolean(server.gateway);byId('gateway-kind').value=server.gateway?.kind||'xray-vless-ws';
       for(const key of new Set(Object.values(gatewayKinds).flatMap(kind=>kind.fields)))byId('gateway-'+key.replaceAll('_','-')).value=server.gateway?.[key]??(key==='port'?443:'');
       byId('gateway-mlkem').value=typeof server.gateway?.support_x25519mlkem768==='boolean'?String(server.gateway.support_x25519mlkem768):'';
       byId('gateway-ws-enabled').checked=Boolean(server.gateway?.ws_backup);
-      for(const key of wsFields)byId('gateway-ws-'+key.replaceAll('_','-')).value=server.gateway?.ws_backup?.[key]??(key==='port'?443:key==='tls_termination'?'xray':'');
+      for(const key of wsFields)byId('gateway-ws-'+key.replaceAll('_','-')).value=(server.gateway?.kind==='xray-vless-ws'?server.gateway:server.gateway?.ws_backup)?.[key]??(key==='port'?443:key==='tls_termination'?'xray':'');
       updateGatewayFields();
     }
     function serverPayload(value,enabled,wsEnabled){
@@ -447,7 +534,7 @@
       if(!enabled)return payload;
       const kind=value.gateway_kind,shape=gatewayKinds[kind];
       if(!shape)throw new Error('请选择支持的入口类型。');
-      const gateway=Object.assign({kind},Object.fromEntries(shape.fields.map(key=>[key,key==='port'?Number(value.gateway_port):value['gateway_'+key]])),shape.flow?{flow:shape.flow}:{});
+      const gateway=kind==='xray-vless-ws'?{kind,...Object.fromEntries(wsFields.map(key=>[key,key==='port'?Number(value.gateway_ws_port):value['gateway_ws_'+key]]))}:Object.assign({kind},Object.fromEntries(shape.fields.map(key=>[key,key==='port'?Number(value.gateway_port):value['gateway_'+key]])),shape.flow?{flow:shape.flow}:{});
       if(shape.flow){
         if(value.gateway_mlkem==='true'||value.gateway_mlkem==='false')gateway.support_x25519mlkem768=value.gateway_mlkem==='true';
         else if(value.gateway_mlkem!=='')throw new Error('请选择有效的 ML-KEM 状态。');
@@ -470,9 +557,11 @@
       const validTag=tag=>typeof tag==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(tag);
       if(!object(value)||Object.keys(value).length!==6||!only(value,['id','name','host','region','status','gateway'])||!validTag(value.id)||!safeText(value.name,120)||!value.name.trim()||!validHost(value.host)||!safeText(value.region,120)||!['active','disabled'].includes(value.status))return false;
       const gateway=value.gateway,kind=Object.hasOwn(gatewayKinds,gateway?.kind)?gatewayKinds[gateway.kind]:null;
-      const required=kind?['kind',...kind.fields,...(kind.flow?['flow']:[])]:[];
+      const required=kind?['kind',...(kind.ws?wsFields:kind.fields),...(kind.flow?['flow']:[])]:[];
       if(!object(gateway)||!kind||!only(gateway,[...required,...(kind.flow?['support_x25519mlkem768','ws_backup']:[])])||!required.every(key=>Object.hasOwn(gateway,key))||!validPort(gateway.port)||!validHost(gateway.server_name))return false;
-      if(kind.flow){
+      if(kind.ws){
+        if(!['address','server_name','host'].every(key=>validHost(gateway[key]))||!validTag(gateway.inbound_tag)||!['xray','external'].includes(gateway.tls_termination)||!safeText(gateway.path,1024)||!gateway.path.startsWith('/')||gateway.path.startsWith('//')||/[\s\\#]/.test(gateway.path))return false;
+      }else if(kind.flow){
         if(gateway.flow!==kind.flow||typeof gateway.public_key!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(gateway.public_key)||typeof gateway.short_id!=='string'||!/^(?:[a-fA-F0-9]{2}){1,8}$/.test(gateway.short_id)||typeof gateway.inbound_tag!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(gateway.inbound_tag))return false;
         const encoded=gateway.public_key.replaceAll('-','+').replaceAll('_','/');const decoded=atob(encoded+'=');if(decoded.length!==32||btoa(decoded).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'')!==gateway.public_key)return false;
         if(Object.hasOwn(gateway,'support_x25519mlkem768')&&typeof gateway.support_x25519mlkem768!=='boolean')return false;
@@ -560,7 +649,7 @@
       byId('server-count').textContent='共 '+servers.length+' 台服务器，启用 '+servers.filter(server=>server.status==='active').length+' 台';
       const container=byId('servers');
       if(!servers.length){container.innerHTML=emptyState('还没有服务器','先登记服务器，再添加或批量导入所属 IP。');return;}
-      container.innerHTML='<table><thead><tr><th>云服务器 / ID</th><th>云入口地址</th><th>地区</th><th>分配状态</th><th>入口配置</th><th>3X-UI 同步</th><th>IP 总数</th><th>已绑定</th><th>可分配</th><th>操作</th></tr></thead><tbody>'+servers.map(server=>'<tr><td><strong>'+esc(server.name)+'</strong><small>'+esc(server.id)+'</small></td><td><code>'+esc(server.host)+'</code></td><td>'+esc(server.region||'未填写')+'</td><td>'+badge(server.status,server.status==='active'?'已启用':'已停用')+'</td><td>'+badge(gatewayReady(server)?'active':'disabled',server.gateway?(gatewayReady(server)?'参数已登记':'参数已登记 · 已停用'):'待配置')+'</td><td class="integration-cell">'+renderIntegration(server)+'</td><td>'+esc(server.ip_count)+'</td><td>'+esc(server.bound_count)+'</td><td>'+esc(gatewayReady(server)?server.available_count:0)+'</td><td><div class="row-actions"><button type="button" class="secondary" data-server-action="edit" data-server-id="'+esc(server.id)+'">编辑</button><button type="button" class="ghost" data-server-action="toggle" data-server-id="'+esc(server.id)+'">'+(server.status==='active'?'停用':'启用')+'</button><button type="button" class="secondary" data-server-action="export" data-server-id="'+esc(server.id)+'" '+(server.gateway?'':'disabled title="请先配置云入口"')+'>'+ (server.gateway?.kind==='xray-vless-reality'?'导出合并资料':'导出 Xray 配置')+'</button><button type="button" class="secondary" data-server-action="materials" data-server-id="'+esc(server.id)+'">安装资料</button></div></td></tr>').join('')+'</tbody></table>';
+      container.innerHTML='<table><thead><tr><th>云服务器 / ID</th><th>云入口地址</th><th>地区</th><th>分配状态</th><th>入口配置</th><th>3X-UI 同步</th><th>IP 总数</th><th>已绑定</th><th>可分配</th><th>操作</th></tr></thead><tbody>'+servers.map(server=>'<tr><td><strong>'+esc(server.name)+'</strong><small>'+esc(server.id)+'</small></td><td><code>'+esc(server.host)+'</code></td><td>'+esc(server.region||'未填写')+'</td><td>'+badge(server.status,server.status==='active'?'已启用':'已停用')+'</td><td>'+badge(gatewayReady(server)?'active':'disabled',server.gateway?(gatewayReady(server)?'参数已登记':'参数已登记 · 已停用'):'待配置')+'</td><td class="integration-cell">'+renderIntegration(server)+'</td><td>'+esc(server.ip_count)+'</td><td>'+esc(server.bound_count)+'</td><td>'+esc(gatewayReady(server)?server.available_count:0)+'</td><td><div class="row-actions"><button type="button" class="secondary" data-server-action="edit" data-server-id="'+esc(server.id)+'">编辑</button><button type="button" class="ghost" data-server-action="toggle" data-server-id="'+esc(server.id)+'">'+(server.status==='active'?'停用':'启用')+'</button><button type="button" class="secondary" data-server-action="export" data-server-id="'+esc(server.id)+'" '+(server.gateway?'':'disabled title="请先配置云入口"')+'>'+ (['xray-vless-reality','xray-vless-ws'].includes(server.gateway?.kind)?'导出合并资料':'导出 Xray 配置')+'</button><button type="button" class="secondary" data-server-action="materials" data-server-id="'+esc(server.id)+'">安装资料</button></div></td></tr>').join('')+'</tbody></table>';
     }
     function renderIps() {
       const search=byId('ip-search').value.trim().toLowerCase(),filter=byId('ip-server-filter').value;
@@ -675,7 +764,7 @@
       const requestToken=token();if(!requestToken||!server.gateway)return;
       button.disabled=true;let url='';
       try{
-        const reality=server.gateway.kind==='xray-vless-reality';
+        const reality=['xray-vless-reality','xray-vless-ws'].includes(server.gateway.kind);
         const blob=await api('/api/servers/'+encodeURIComponent(server.id)+(reality?'/xray-merge':'/xray-config'),{responseType:'blob',cache:'no-store'});
         if(!requestToken||requestToken!==token())return;
         url=URL.createObjectURL(blob);const link=document.createElement('a');link.href=url;link.download=(reality?'xray-merge-':'xray-')+server.id+'.json';
@@ -780,6 +869,7 @@
       }catch(error){if(materialsCurrent(snapshot))materialMessage(materialError(error),true);}
       finally{if(url)URL.revokeObjectURL(url);if(materialsCurrent(snapshot))button.disabled=false;}
     }
+    window.addEventListener('DOMContentLoaded',()=>void restoreSession());
     window.bindUser=bindUser;window.disableUser=disableUser;window.rotateToken=rotateToken;
     renderServerChoices();renderServers();renderSubscriptions();renderIps();renderUsers();renderOverview();setSidebar(false);
   </script>

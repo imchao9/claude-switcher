@@ -22,7 +22,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 
-from .gateway import gateway_server_identity, valid_host, validate_gateway, xray_merge
+from .gateway import gateway_server_identity, valid_host, validate_gateway, ws_gateway, xray_merge
 from .xui_contract import desired_revision
 
 CONFIG = Path('/etc/claude-switcher-sync/config.json')
@@ -98,13 +98,16 @@ def source_snapshot(config):
             gateway = validate_gateway(json.loads(server['gateway_json']))
             if (gateway is None or server['host'] != config['expected_host']
                     or digest(gateway_server_identity(gateway)) != config['gateway_digest']
-                    or gateway['kind'] != 'xray-vless-reality'
+                    or gateway['kind'] not in {'xray-vless-reality', 'xray-vless-ws'}
                     or gateway['inbound_tag'] != config['inbound_tag']
                     or server['status'] not in {'active', 'disabled'}):
                 raise SyncError('target_drift')
-            ws = gateway.get('ws_backup')
-            if ws and (config.get('ws_backup', {}).get('inbound_tag') != ws['inbound_tag']
-                       or config['ws_backup'].get('tls_termination') != ws['tls_termination']):
+            ws = ws_gateway(gateway)
+            if config.get('transport', 'reality') != ('ws' if gateway['kind'] == 'xray-vless-ws' else 'reality'):
+                raise SyncError('target_drift')
+            ws_pin = config if gateway['kind'] == 'xray-vless-ws' else config.get('ws_backup', {})
+            if ws and (ws_pin.get('inbound_tag') != ws['inbound_tag']
+                       or ws_pin.get('tls_termination') != ws['tls_termination']):
                 raise SyncError('target_drift')
             rows = [dict(row) for row in db.execute('''SELECT u.ingress_uuid,i.id AS ip_id,
                 i.address,i.port,i.protocol,i.config_json FROM users u JOIN bindings b ON b.user_id=u.id
@@ -359,7 +362,21 @@ def guard_rules(identity_targets, block):
 
 def configured_targets(config):
     primary = {key: config[key] for key in ('inbound_id', 'inbound_tag', 'inbound_digest')}
-    pins = [dict(primary, transport='reality')]
+    transport = config.get('transport', 'reality')
+    if transport not in {'reality', 'ws'}:
+        raise SyncError('unsafe_path')
+    if transport == 'ws':
+        if config.get('tls_termination') not in {'xray', 'external'} or 'ws_backup' in config:
+            raise SyncError('unsafe_path')
+        primary['tls_termination'] = config['tls_termination']
+    elif 'tls_termination' in config:
+        raise SyncError('unsafe_path')
+    pins = [dict(primary, transport=transport)]
+    if 'retired_reality' in config:
+        retired = config['retired_reality']
+        if not isinstance(retired, dict) or set(retired) != {'inbound_id', 'inbound_tag', 'inbound_digest'}:
+            raise SyncError('unsafe_path')
+        pins.append(dict(retired, transport='reality'))
     if 'ws_backup' in config:
         ws = config['ws_backup']
         if (not isinstance(ws, dict)
@@ -386,7 +403,7 @@ def validate_config(config):
     required = {'source_db', 'server_id', 'expected_host', 'inbound_id', 'inbound_tag',
                 'gateway_digest', 'inbound_digest'}
     if (not isinstance(config, dict) or not required <= set(config)
-            or set(config) - required - {'ws_backup'}
+            or set(config) - required - {'ws_backup', 'transport', 'tls_termination', 'retired_reality'}
             or not isinstance(config['server_id'], str)
             or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', config['server_id'])
             or not isinstance(config['gateway_digest'], str)
@@ -433,7 +450,9 @@ def validate_target(config, observed, desired=None):
             if stream.get('security') != 'reality' or stream.get('network') not in ('tcp', 'raw'):
                 raise SyncError('target_drift')
         else:
-            ws = desired.gateway.get('ws_backup') if desired and desired.gateway else None
+            ws = ws_gateway(desired.gateway) if desired else None
+            if ws and ws['inbound_tag'] != tag:
+                ws = None
             validate_ws_origin(matches[0], pin, ws)
     if (not isinstance(observed.template, dict) or 'xraySetting' in observed.template
             or not isinstance(observed.template.get('outbounds'), list)
@@ -444,7 +463,7 @@ def validate_target(config, observed, desired=None):
 def identity_targets(config, state, desired):
     targets = configured_targets(config)
     if 'identity_targets' not in state:
-        primary = config['inbound_tag']
+        primary = config.get('retired_reality', {}).get('inbound_tag', config['inbound_tag'])
         for rule in state['rules']:
             if set(rule.get('user', [])) & set(state['identities']) and rule.get('inboundTag') != [primary]:
                 raise SyncError('target_drift')
@@ -600,7 +619,9 @@ def verify_runtime(config, observed, clients, outbounds, rules, state, desired):
         if any(inbound.get(key) != panel.get(key) for key in ('protocol', 'listen', 'port')):
             raise SyncError('runtime_unverified')
         if pin['transport'] == 'ws':
-            ws = desired.gateway.get('ws_backup') if desired.gateway else None
+            ws = ws_gateway(desired.gateway)
+            if ws and ws['inbound_tag'] != tag:
+                ws = None
             try:
                 validate_ws_origin(inbound, pin, ws)
             except SyncError:

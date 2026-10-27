@@ -29,6 +29,7 @@ def validate_gateway(value: Any) -> dict[str, Any] | None:
     if value is None:
         return None
     schemas = {
+        'xray-vless-ws': {'kind', 'address', 'port', 'server_name', 'host', 'path', 'inbound_tag', 'tls_termination'},
         'xray-vless-tls': {'kind', 'port', 'server_name', 'certificate_file', 'key_file'},
         'xray-vless-reality': {'kind', 'port', 'server_name', 'public_key', 'short_id', 'inbound_tag', 'flow'},
     }
@@ -55,20 +56,11 @@ def validate_gateway(value: Any) -> dict[str, Any] | None:
             raise DomainError('invalid gateway configuration')
         if 'ws_backup' in value:
             ws = value['ws_backup']
-            if (not isinstance(ws, dict)
-                    or set(ws) != {'address', 'port', 'server_name', 'host', 'path', 'inbound_tag', 'tls_termination'}
-                    or any(not valid_host(ws[key]) for key in ('address', 'server_name', 'host'))
-                    or isinstance(ws['port'], bool) or not isinstance(ws['port'], int)
-                    or not 1 <= ws['port'] <= 65535
-                    or not isinstance(ws['path'], str) or not ws['path'].startswith('/')
-                    or ws['path'].startswith('//') or len(ws['path']) > 1024
-                    or any(c.isspace() or ord(c) <= 32 or 127 <= ord(c) <= 159 for c in ws['path'])
-                    or any(c in ws['path'] for c in ('#', '\\'))
-                    or not isinstance(ws['inbound_tag'], str)
-                    or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', ws['inbound_tag'])
-                    or ws['inbound_tag'] == value['inbound_tag']
-                    or ws['tls_termination'] not in ('xray', 'external')):
+            validate_ws(ws)
+            if ws['inbound_tag'] == value['inbound_tag']:
                 raise DomainError('invalid gateway configuration')
+    elif value['kind'] == 'xray-vless-ws':
+        validate_ws({key: item for key, item in value.items() if key != 'kind'})
     else:
         for key in ['certificate_file', 'key_file']:
             path = value[key]
@@ -82,6 +74,27 @@ def validate_gateway(value: Any) -> dict[str, Any] | None:
     if 'ws_backup' in result:
         result['ws_backup'] = dict(result['ws_backup'])
     return result
+
+
+def validate_ws(ws: Any) -> None:
+    if (not isinstance(ws, dict)
+            or set(ws) != {'address', 'port', 'server_name', 'host', 'path', 'inbound_tag', 'tls_termination'}
+            or any(not valid_host(ws[key]) for key in ('address', 'server_name', 'host'))
+            or isinstance(ws['port'], bool) or not isinstance(ws['port'], int) or not 1 <= ws['port'] <= 65535
+            or not isinstance(ws['path'], str) or not ws['path'].startswith('/')
+            or ws['path'].startswith('//') or len(ws['path']) > 1024
+            or any(c.isspace() or ord(c) <= 32 or 127 <= ord(c) <= 159 for c in ws['path'])
+            or any(c in ws['path'] for c in ('#', '\\'))
+            or not isinstance(ws['inbound_tag'], str)
+            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', ws['inbound_tag'])
+            or ws['tls_termination'] not in ('xray', 'external')):
+        raise DomainError('invalid gateway configuration')
+
+
+def ws_gateway(gateway: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not gateway:
+        return None
+    return gateway if gateway['kind'] == 'xray-vless-ws' else gateway.get('ws_backup')
 
 
 def gateway_server_identity(gateway: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -124,9 +137,9 @@ def managed_nodes(user: dict[str, Any], server: dict[str, Any], gateway: dict[st
                      'reality-opts': {'public-key': gateway['public_key'], 'short-id': gateway['short_id']}})
         if 'support_x25519mlkem768' in gateway:
             node['reality-opts']['support-x25519mlkem768'] = gateway['support_x25519mlkem768']
-    nodes = [node]
-    if 'ws_backup' in gateway:
-        ws = gateway['ws_backup']
+    nodes = [] if gateway['kind'] == 'xray-vless-ws' else [node]
+    ws = ws_gateway(gateway)
+    if ws:
         nodes.append({'name': user['id'] + '-gateway-ws', 'type': 'vless', 'server': ws['address'],
                       'port': ws['port'], 'uuid': ws_identity(user['ingress_uuid']), 'tls': True,
                       'servername': ws['server_name'], 'skip-cert-verify': False,
@@ -161,7 +174,7 @@ def upstream_outbound(row: dict[str, Any], tag: str) -> dict[str, Any]:
 
 
 def xray_config(server: dict[str, Any], gateway: dict[str, Any], bindings: list[dict[str, Any]]) -> dict[str, Any]:
-    if gateway['kind'] == 'xray-vless-reality':
+    if gateway['kind'] in {'xray-vless-reality', 'xray-vless-ws'}:
         raise DomainError('manual_panel_merge_required')
     users, outbounds, routes = [], [{'tag': 'block', 'protocol': 'blackhole', 'settings': {}}], []
     if server['status'] == 'active':
@@ -184,7 +197,7 @@ def xray_config(server: dict[str, Any], gateway: dict[str, Any], bindings: list[
 
 
 def xray_merge(server: dict[str, Any], gateway: dict[str, Any], bindings: list[dict[str, Any]]) -> dict[str, Any]:
-    if gateway['kind'] != 'xray-vless-reality':
+    if gateway['kind'] not in {'xray-vless-reality', 'xray-vless-ws'}:
         raise DomainError('reality_gateway_required')
     namespace = 'cs-' + server['id']
     block_tag = namespace + '-block'
@@ -193,21 +206,24 @@ def xray_merge(server: dict[str, Any], gateway: dict[str, Any], bindings: list[d
         for row in bindings:
             email = namespace + '-' + row['ingress_uuid'] + '@users.claude-switcher.invalid'
             tag = namespace + '-residential-' + row['ip_id']
-            clients.append({'id': row['ingress_uuid'], 'email': email, 'flow': gateway['flow']})
+            if gateway['kind'] == 'xray-vless-reality':
+                clients.append({'id': row['ingress_uuid'], 'email': email, 'flow': gateway['flow']})
             outbounds.append(upstream_outbound(row, tag))
-            rules.extend([{'type': 'field', 'inboundTag': [gateway['inbound_tag']], 'user': [email],
-                           'network': network, 'outboundTag': outbound}
-                          for network, outbound in [('tcp', tag), ('udp', block_tag)]])
-            managed.append({'uuid': row['ingress_uuid'], 'email': email, 'outbound_tag': tag})
-            if 'ws_backup' in gateway:
+            if gateway['kind'] == 'xray-vless-reality':
+                rules.extend([{'type': 'field', 'inboundTag': [gateway['inbound_tag']], 'user': [email],
+                               'network': network, 'outboundTag': outbound}
+                              for network, outbound in [('tcp', tag), ('udp', block_tag)]])
+                managed.append({'uuid': row['ingress_uuid'], 'email': email, 'outbound_tag': tag})
+            ws = ws_gateway(gateway)
+            if ws:
                 ws_uuid = ws_identity(row['ingress_uuid'])
                 ws_email = namespace + '-' + row['ingress_uuid'] + '-ws@users.claude-switcher.invalid'
                 ws_clients.append({'id': ws_uuid, 'email': ws_email, 'flow': ''})
-                rules.extend([{'type': 'field', 'inboundTag': [gateway['ws_backup']['inbound_tag']],
+                rules.extend([{'type': 'field', 'inboundTag': [ws['inbound_tag']],
                                'user': [ws_email], 'network': network, 'outboundTag': outbound}
                               for network, outbound in [('tcp', tag), ('udp', block_tag)]])
                 managed.append({'uuid': ws_uuid, 'email': ws_email, 'outbound_tag': tag})
-    if clients:
+    if clients or ws_clients:
         outbounds.append({'tag': block_tag, 'protocol': 'blackhole', 'settings': {}})
     result = {'format': 'claude-switcher-3xui-merge-v1', 'application_status': 'not_applied',
             'server_id': server['id'], 'inbound_tag': gateway['inbound_tag'], 'clients': clients,
@@ -221,6 +237,8 @@ def xray_merge(server: dict[str, Any], gateway: dict[str, Any], bindings: list[d
                 'Preserve all unmanaged clients, WS inbounds, Reality private keys and panel-owned generated configuration.',
                 'On disable or rebind manually remove the old managed UUID, email, routes and outbounds. An empty list is not a revocation snapshot.',
                 'Do not use the fresh-install template apply tool, replace the full config, or add catch-all rules. Remote access remains unverified.']}
-    if 'ws_backup' in gateway:
+    if gateway['kind'] == 'xray-vless-ws':
+        result['clients'] = ws_clients
+    elif 'ws_backup' in gateway:
         result['additional_inbounds'] = [{'inbound_tag': gateway['ws_backup']['inbound_tag'], 'clients': ws_clients}]
     return result

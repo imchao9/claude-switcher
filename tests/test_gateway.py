@@ -37,7 +37,7 @@ class GatewayTests(unittest.TestCase):
         return self.store.add_server({'id': name, 'name': name.upper(), 'host': name + '.example',
                                       'gateway': GATEWAY, **changes})
 
-    def ip(self, name='exit-a', server_id='a', address='8.8.8.8', **changes):
+    def ip(self, name='exit-a', server_id='a', address='8.8.4.4', **changes):
         return self.store.add_ip({'id': name, 'server_id': server_id, 'address': address, 'port': 1080,
                                   'protocol': 'socks5', 'config': {'username': name + '-login',
                                   'password': name + '-private'}, **changes})
@@ -98,10 +98,10 @@ class GatewayTests(unittest.TestCase):
         for fmt in ['clash', 'uri', 'base64']:
             status, headers, body = self.request('/s/' + created['token'] + '?format=' + fmt, False)
             self.assertEqual(status, 200)
-            self.assertEqual(headers['X-Claude-Switcher-Egress-IP'], '8.8.8.8')
+            self.assertEqual(headers['X-Claude-Switcher-Egress-IP'], '8.8.4.4')
             if fmt == 'base64':
                 body = base64.b64decode(body)
-            for secret in ['8.8.8.8', 'exit-a-login', 'exit-a-private', created['token']]:
+            for secret in ['8.8.4.4', 'exit-a-login', 'exit-a-private', created['token']]:
                 self.assertNotIn(secret.encode(), body)
             self.assertIn(b'a.example', body)
             self.assertIn(identity.encode(), body)
