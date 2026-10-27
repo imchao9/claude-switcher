@@ -1736,7 +1736,7 @@ self_update() {
     fi
 
     tmpd=$(mktemp -d)
-    if ! curl -sL --max-time 30 "https://codeload.github.com/YOURSJEYO/claude-switcher/zip/refs/heads/main" -o "$tmpd/main.zip" \
+    if ! curl -sL --max-time 30 "https://codeload.github.com/imchao9/claude-switcher/zip/refs/heads/main" -o "$tmpd/main.zip" \
         || ! unzip -q "$tmpd/main.zip" -d "$tmpd" 2>/dev/null; then
         echo "FAIL:下载或解压失败(网络问题,稍后再试)"; rm -rf "$tmpd"; return 1
     fi
@@ -1746,7 +1746,7 @@ self_update() {
     fi
 
     # 工件完整性校验:逐项比对仓库 SHA256SUMS,任一不符即中止(防传输篡改;信任根为 GitHub 仓库本身)
-    if ! curl -sL --max-time 15 "https://raw.githubusercontent.com/YOURSJEYO/claude-switcher/main/SHA256SUMS" -o "$tmpd/SHA256SUMS" \
+    if ! curl -sL --max-time 15 "https://raw.githubusercontent.com/imchao9/claude-switcher/main/SHA256SUMS" -o "$tmpd/SHA256SUMS" \
         || [ ! -s "$tmpd/SHA256SUMS" ]; then
         echo "FAIL:无法获取校验清单(SHA256SUMS),已中止"; rm -rf "$tmpd"; return 1
     fi
