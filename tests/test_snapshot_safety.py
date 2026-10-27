@@ -33,6 +33,7 @@ class SnapshotSafetyTests(unittest.TestCase):
         cls.archive = function_source("archive_current")
         cls.switch = function_source("switch_to")
         cls.switch += "\n" + function_source("launch_claude")
+        cls.valid = function_source("valid_account")
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(
@@ -92,7 +93,7 @@ mv() {
 }
 '''
         return subprocess.run(
-            ["/bin/bash", "-c", harness + "\n" + code],
+            ["/bin/bash", "-c", harness + "\n" + self.valid + "\n" + code],
             env=env,
             cwd=self.fixture,
             text=True,

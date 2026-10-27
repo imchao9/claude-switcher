@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude 账号切换器 - 核心脚本 (通用版)
-# 用法: claude-switch.sh check | status | switch A|B | checkdetail | fix | set-region | update [--auto] | subscription set|fetch|status|ports|check|install|clear | diagnose-proxy
+# 用法: claude-switch.sh check | status | switch A|B|C|D | checkdetail | fix | set-region | update [--check|--auto] | subscription set|fetch|status|ports|check|install|clear | diagnose-proxy
 set -u
 export LC_ALL=en_US.UTF-8
 umask 077
@@ -141,6 +141,394 @@ if __name__ == "__main__":
 PY_PROXY_DIAGNOSE
 fi
 
+if [ "${1:-}" = "clash-rules" ]; then
+    shift
+    exec "${CLAUDE_SWITCHER_PYTHON:-python3}" - "$@" <<'PY_CLASH_RULES'
+"""Install and verify the Clash Verge global script without trusting Merge.yaml text."""
+import http.client
+import ipaddress
+import json
+import os
+import re
+import shutil
+import socket
+import sys
+import tempfile
+import time
+from pathlib import Path
+from urllib.parse import urlsplit
+
+
+DOMAINS = (
+    "claude.ai", "claude.com", "anthropic.com", "claudeusercontent.com",
+    "challenges.cloudflare.com", "datadoghq.com", "segment.io", "stripe.com",
+    "stripe.network", "stripecdn.com", "intercom.io", "intercomcdn.com",
+    "intercomassets.com",
+)
+PORTS = (3478, 5349, 19302)
+SCRIPT_BEGIN = "// >>> claude-switcher managed rules >>>"
+SCRIPT_END = "// <<< claude-switcher managed rules <<<"
+MERGE_BEGIN = "# >>> claude-switcher pinned rules >>>"
+MERGE_END = "# <<< claude-switcher pinned rules <<<"
+
+
+def fail(message):
+    print("FAIL:" + message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def read_yaml_scalar(path, key):
+    if not path.exists():
+        return ""
+    match = re.search(r"^" + re.escape(key) + r":[ \t]*(.*)$", read_text(path), re.M)
+    if not match:
+        return ""
+    value = match.group(1).strip()
+    if value.startswith('"'):
+        return json.JSONDecoder().raw_decode(value)[0]
+    if value.startswith("'"):
+        match = re.fullmatch(r"'((?:[^']|'')*)'\s*(?:#.*)?", value)
+        if not match:
+            fail("无法读取 Clash 控制接口配置")
+        return match.group(1).replace("''", "'")
+    value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
+    if value in {"", "null", "~"}:
+        return ""
+    if value.startswith(("|", ">", "*", "&", "[", "{")):
+        fail("Clash 控制接口需要普通标量配置")
+    return value
+
+
+def read_text(path):
+    return path.read_bytes().decode("utf-8-sig")
+
+
+def controller_config(clash_dir):
+    for name in ("clash-verge.yaml", "verge.yaml"):
+        path = clash_dir / name
+        unix_path = read_yaml_scalar(path, "external-controller-unix")
+        secret = read_yaml_scalar(path, "secret")
+        if "\r" in secret or "\n" in secret:
+            fail("Clash 控制接口密钥格式无效")
+        if unix_path and hasattr(socket, "AF_UNIX"):
+            if not os.path.isabs(unix_path):
+                fail("Clash Unix socket 路径必须为绝对路径")
+            # 生成的配置可能记着已失效的临时 socket(Clash Verge 重启后路径会变);
+            # 依次尝试配置路径与服务实际使用的用户级 socket,都存在才继续走 TCP 分支
+            candidates = [unix_path]
+            if hasattr(os, "getuid"):
+                candidates.append(
+                    "/var/run/clash-verge-service/users/%d/verge-mihomo.sock" % os.getuid())
+            for candidate in candidates:
+                if os.path.isabs(candidate) and Path(candidate).exists():
+                    return ("unix", candidate, None), secret
+        endpoint = read_yaml_scalar(path, "external-controller")
+        if endpoint:
+            if not endpoint.startswith(("http://", "https://")):
+                endpoint = "http://" + endpoint
+            parsed = urlsplit(endpoint)
+            host = parsed.hostname
+            if host in {"0.0.0.0", "::"}:
+                host = "127.0.0.1" if host == "0.0.0.0" else "::1"
+            if host != "localhost":
+                try:
+                    local = ipaddress.ip_address(host).is_loopback
+                except ValueError:
+                    local = False
+                if not local:
+                    fail("只允许验证本机 Clash 控制接口")
+            if (parsed.scheme not in {"http", "https"} or not parsed.port
+                    or parsed.username or parsed.password or parsed.path not in {"", "/"}
+                    or parsed.query or parsed.fragment):
+                fail("Clash 控制接口地址格式无效")
+            return (parsed.scheme, host, parsed.port), secret
+    fail("未找到本机 Clash 控制接口，无法验证内核规则")
+
+
+def api_get(endpoint, secret, path):
+    headers = {"Accept": "application/json"}
+    if secret:
+        headers["Authorization"] = "Bearer " + secret
+    scheme, host, port = endpoint
+    connection = None
+    try:
+        if scheme == "unix":
+            connection = http.client.HTTPConnection("localhost", timeout=2)
+            connection.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            connection.sock.settimeout(2)
+            connection.sock.connect(host)
+        else:
+            cls = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
+            connection = cls(host, port, timeout=2)
+        # http.client connects directly; inherited proxy variables are never used.
+        connection.request("GET", path, headers=headers)
+        response = connection.getresponse()
+        if response.status != 200:
+            fail("Clash 内核接口未返回成功状态")
+        data = response.read(2 * 1024 * 1024 + 1)
+        if len(data) > 2 * 1024 * 1024:
+            fail("Clash 内核接口响应过大")
+        value = json.loads(data.decode("utf-8"))
+        if not isinstance(value, dict):
+            fail("Clash 内核接口返回格式异常")
+        return value
+    except (http.client.HTTPException, OSError, ValueError) as exc:
+        fail("Clash 内核接口不可用(" + exc.__class__.__name__ + ")")
+    finally:
+        if connection:
+            connection.close()
+
+
+def selected_proxy(proxies, name, seen=None):
+    seen = set() if seen is None else seen
+    if name in seen:
+        fail("代理组存在循环引用")
+    seen.add(name)
+    item = proxies.get(name)
+    if not isinstance(item, dict):
+        fail("代理组不存在:" + name)
+    if "all" in item or "now" in item:
+        current = item.get("now")
+        if not current or current == name:
+            fail("代理组没有可用的当前节点:" + name)
+        return selected_proxy(proxies, current, seen)
+    return item
+
+
+def validate_group(state, group, policy):
+    proxies = state.get("proxies", {}).get("proxies", {})
+    if not isinstance(proxies, dict) or group in {"DIRECT", "REJECT", "GLOBAL", "PASS"}:
+        fail("请选择实际的代理组")
+    if not isinstance(proxies.get(group), dict) or "all" not in proxies[group]:
+        fail("配置的代理组不存在")
+    selected = selected_proxy(proxies, group)
+    selected_type = str(selected.get("type", "")).lower()
+    if selected_type in {"direct", "reject", "block"}:
+        fail("代理组当前节点为直连或拒绝，请选择代理节点")
+    if policy == "proxy" and selected.get("udp") is not True:
+        fail("当前节点未确认支持 UDP，请更换节点或选择 reject 策略")
+
+
+def norm(value):
+    return re.sub(r"[\s()_-]+", "", str(value).upper()).replace("&&", ",")
+
+
+def expected_rules():
+    rules = [("port", p) for p in PORTS]
+    rules.extend(("domain", d) for d in DOMAINS)
+    return rules
+
+
+def verify_runtime(clash_dir, group, policy):
+    base, secret = controller_config(clash_dir)
+    state = {
+        "configs": api_get(base, secret, "/configs"),
+        "rules": api_get(base, secret, "/rules"),
+        "proxies": api_get(base, secret, "/proxies"),
+    }
+    if str(state["configs"].get("mode", "")).lower() != "rule":
+        fail("Clash 当前不是 rule 模式")
+    validate_group(state, group, policy)
+    rules = state["rules"].get("rules")
+    if not isinstance(rules, list):
+        fail("Clash /rules 返回格式异常")
+    expected = expected_rules()
+    if len(rules) < len(expected):
+        fail("运行中的规则数量不足")
+    for index, (kind, value) in enumerate(expected):
+        if kind == "port":
+            rule = rules[index]
+            target = "REJECT" if policy == "reject" else group
+            payload = norm(rule.get("payload", "")) if isinstance(rule, dict) else ""
+            if (not isinstance(rule, dict) or str(rule.get("type", "")).upper() != "AND"
+                    or payload != "NETWORK,UDP,DSTPORT," + str(value)
+                    or rule.get("proxy") != target
+                    or (rule.get("extra") or {}).get("disabled") is True):
+                fail("运行规则未按策略置顶:UDP/" + str(value))
+        else:
+            rule = rules[index]
+            if (not isinstance(rule, dict)
+                    or str(rule.get("type", "")).upper().replace("_", "-") not in {"DOMAIN-SUFFIX", "DOMAINSUFFIX"}
+                    or str(rule.get("payload", "")).strip().lower() != value
+                    or rule.get("proxy") != group
+                    or (rule.get("extra") or {}).get("disabled") is True):
+                fail("运行规则未按策略置顶:" + value)
+    return state
+
+
+def rule_strings(group, policy):
+    target = "REJECT" if policy == "reject" else group
+    return ([f"AND,((NETWORK,UDP),(DST-PORT,{port})),{target}" for port in PORTS] +
+            [f"DOMAIN-SUFFIX,{domain},{group}" for domain in DOMAINS])
+
+
+def managed_block(group, policy):
+    encoded = json.dumps(rule_strings(group, policy), ensure_ascii=False)
+    group_json = json.dumps(group, ensure_ascii=False)
+    return f"""{SCRIPT_BEGIN}
+;(function () {{
+  const originalMain = main;
+  const pinnedRules = {encoded};
+  const group = {group_json};
+  main = function (config, ...args) {{
+    const result = originalMain(config, ...args);
+    if (!result || typeof result !== \"object\" || Array.isArray(result)) throw new Error(\"claude-switcher: original main must return a config object\");
+    if (!Array.isArray(result[\"proxy-groups\"]) || !result[\"proxy-groups\"].some((item) => item && item.name === group)) throw new Error(\"claude-switcher: configured proxy group missing\");
+    if (result.rules !== undefined && !Array.isArray(result.rules)) throw new Error(\"claude-switcher: rules must be an array\");
+    result.rules = pinnedRules.concat((result.rules || []).filter((rule) => !pinnedRules.includes(rule)));
+    return result;
+  }};
+}})();
+{SCRIPT_END}"""
+
+
+def script_text(path, group, policy):
+    old = read_text(path) if path.exists() else ""
+    block = managed_block(group, policy)
+    if SCRIPT_BEGIN in old:
+        if old.count(SCRIPT_BEGIN) != 1 or old.count(SCRIPT_END) != 1:
+            fail("Script.js 中存在未闭合的 claude-switcher 管理块")
+        pattern = re.compile(re.escape(SCRIPT_BEGIN) + r".*?" + re.escape(SCRIPT_END), re.S)
+        if old.index(SCRIPT_END) < old.index(SCRIPT_BEGIN):
+            fail("Script.js 中的管理块顺序无效")
+        return pattern.sub(lambda _: block, old, count=1)
+    if SCRIPT_END in old:
+        fail("Script.js 中存在孤立的 claude-switcher 管理块")
+    if not old.strip():
+        old = "function main(config) { return config; }\n"
+    match = re.search(r"function\s+main\s*\(", old)
+    if not match:
+        fail("现有 Script.js 没有可组合的 main(config)，已停止以免覆盖用户脚本")
+    return old + ("" if old.endswith("\n") else "\n") + block + "\n"
+
+
+def migrate_merge(path):
+    if not path.exists():
+        return None
+    old = read_text(path)
+    if MERGE_BEGIN not in old:
+        if MERGE_END in old:
+            fail("Merge.yaml 中存在孤立的 claude-switcher 管理块")
+        return old
+    if old.count(MERGE_BEGIN) != 1 or old.count(MERGE_END) != 1 or old.index(MERGE_END) < old.index(MERGE_BEGIN):
+        fail("Merge.yaml 中存在未闭合的 claude-switcher 管理块")
+    pattern = re.compile(r"(?ms)^[ \t]*" + re.escape(MERGE_BEGIN) + r"[ \t]*\r?\n.*?^[ \t]*" + re.escape(MERGE_END) + r"[ \t]*\r?\n?")
+    new = pattern.sub("", old, count=1)
+    return new
+
+
+def write_changes(changes):
+    changes = {path: data.encode("utf-8") for path, data in changes.items()
+               if not path.exists() or path.read_bytes() != data.encode("utf-8")}
+    originals, staged, replaced = {}, {}, []
+    try:
+        for path, data in changes.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            originals[path] = path.read_bytes() if path.exists() else None
+            if path.exists():
+                shutil.copy2(path, path.with_name(path.name + ".bak." + str(time.time_ns())))
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".claude-switcher-", delete=False) as handle:
+                staged[path] = Path(handle.name)
+                handle.write(data)
+            if path.exists():
+                staged[path].chmod(path.stat().st_mode & 0o777)
+        for path, temp in staged.items():
+            os.replace(temp, path)
+            replaced.append(path)
+    except OSError:
+        for path in reversed(replaced):
+            if originals[path] is None:
+                path.unlink()
+            else:
+                path.write_bytes(originals[path])
+        raise
+    finally:
+        for temp in staged.values():
+            if temp.exists():
+                temp.unlink()
+
+
+def assess_probe(policy, expected_ip, output, exit_code):
+    if exit_code != "0":
+        return "fail:STUN 探测执行失败，未确认 UDP 出口"
+    try:
+        expected = ipaddress.IPv4Address(expected_ip)
+    except ValueError:
+        return "fail:未获取有效的 IPv4 出口，无法比对 STUN 结果"
+    if output == "RESULT:NONE":
+        if policy == "reject":
+            return "ok:常见 STUN UDP 拒绝规则已验证，探测无响应"
+        return "fail:STUN 无响应，无法确认 UDP 是否经过代理"
+    if not output.startswith("RESULT:"):
+        return "fail:STUN 探测结果格式异常"
+    try:
+        addresses = [ipaddress.IPv4Address(value) for value in output[7:].split(",")]
+    except ValueError:
+        return "fail:STUN 探测结果格式异常"
+    if policy == "reject":
+        return "fail:拒绝策略下仍收到 STUN 响应，请检查运行规则"
+    if any(address != expected for address in addresses):
+        return "fail:STUN 暴露了非代理出口地址"
+    return "ok:STUN 仅返回代理出口地址"
+
+
+def main():
+    if len(sys.argv) < 5:
+        fail("内部参数不足")
+    action, clash_dir, base_dir, group = sys.argv[1:5]
+    clash_dir = Path(clash_dir)
+    base_dir = Path(base_dir)
+    policy_path = base_dir / "webrtc-policy"
+    policy = sys.argv[5] if len(sys.argv) > 5 else ""
+    policy = policy or (read_text(policy_path).strip() if policy_path.exists() else "proxy")
+    if policy not in {"proxy", "reject"}:
+        fail("WEBRTC_POLICY 只能是 proxy 或 reject")
+    if action == "policy":
+        print(policy)
+        return 0
+    if action == "assess" and len(sys.argv) == 9:
+        print(assess_probe(policy, *sys.argv[6:9]))
+        return 0
+    if action == "mode":
+        base, secret = controller_config(clash_dir)
+        print(str(api_get(base, secret, "/configs").get("mode", "")).lower())
+        return 0
+    if not group or any(char in group for char in ",\r\n"):
+        fail("代理组名为空或包含规则分隔符")
+    if action == "verify":
+        verify_runtime(clash_dir, group, policy)
+        print("OK:运行时规则已验证(" + policy + ")")
+        return 0
+    if action != "write":
+        fail("未知内部动作")
+
+    base, secret = controller_config(clash_dir)
+    state = {"configs": api_get(base, secret, "/configs"),
+             "proxies": api_get(base, secret, "/proxies")}
+    if str(state["configs"].get("mode", "")).lower() != "rule":
+        fail("Clash 当前不是 rule 模式")
+    validate_group(state, group, policy)
+    profiles = clash_dir / "profiles"
+    script_path = profiles / "Script.js"
+    merge_path = profiles / "Merge.yaml"
+    new_script = script_text(script_path, group, policy)
+    new_merge = migrate_merge(merge_path)
+    changes = {script_path: new_script, policy_path: policy + "\n"}
+    if new_merge is not None:
+        changes[merge_path] = new_merge
+    write_changes(changes)
+    print("OK:全局脚本已写入(" + policy + ")")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, TypeError, AttributeError):
+        fail("规则配置处理失败，未确认修复；请检查配置格式与权限")
+PY_CLASH_RULES
+fi
+
 # ============ 安装时可配置项(安装程序会自动改写) ============
 PROXY_MODE="clash-verge"       # 代理客户端: clash-verge|shadowrocket|sing-box|clashx|surge|auto
 PROXY_GROUP="IpEqual"          # Clash 代理组名(安装时自动探测)
@@ -156,6 +544,7 @@ CLASH_DIR="$HOME/Library/Application Support/io.github.clash-verge-rev.clash-ver
 SUBSCRIPTION_MANIFEST="$BASE/subscription.json"
 SUBSCRIPTION_FILE="$BASE/subscription.yaml"
 ROUTE_MISSED=""
+KEEP_STAGED=0
 case "${1:-}" in
     code|code-health) ;;
     *) mkdir -p "$BASE/accounts" ;;
@@ -216,104 +605,20 @@ proxy_alive() {
     esac
 }
 
-# 置顶规则配置检查(仅 Clash Verge):合并配置里是否含置顶规则
-merge_ok() {
-    grep -q "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" "$CLASH_DIR/clash-verge.yaml" 2>/dev/null
+# 单文件内嵌 Python 的隔离入口;策略从 WEBRTC_POLICY 或持久化文件读取。
+clash_rules() {
+    local action="$1"
+    shift
+    "${BASH:-/bin/bash}" "$0" clash-rules "$action" "$CLASH_DIR" "$BASE" "$PROXY_GROUP" "${WEBRTC_POLICY:-}" "$@"
 }
 
+# 只接受运行中内核加载的规则，不再用配置文本或 fake-ip 代替。
+merge_ok() { clash_rules verify >/dev/null 2>&1; }
 stun_ok() {
-    python3 - "$CLASH_DIR/clash-verge.yaml" "$PROXY_GROUP" <<'PY_STUN_RULES'
-import json
-from pathlib import Path
-import re
-import sys
-
-
-def scalar(value):
-    value = value.strip()
-    if not value:
-        raise ValueError()
-    if value.startswith('"'):
-        result, end = json.JSONDecoder().raw_decode(value)
-        tail = value[end:]
-        if not isinstance(result, str) or (tail and not re.fullmatch(r'\s+(?:#.*)?', tail)):
-            raise ValueError()
-        return result
-    if value.startswith("'"):
-        match = re.fullmatch(r"'((?:[^']|'')*)'(?:\s+(?:#.*)?)?", value)
-        if not match:
-            raise ValueError()
-        return match[1].replace("''", "'")
-    if value[0] in '[]{}&*!|>@`' or ': ' in value:
-        raise ValueError()
-    return re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
-
-
-def pinned(text, group):
-    if group in ('', 'DIRECT', 'REJECT', 'REJECT-DROP', 'PASS'):
-        return False
-    rules = []
-    found = False
-    inside = False
-    item_indent = None
-    for line in text.splitlines():
-        if not line.strip() or line.lstrip().startswith('#'):
-            continue
-        if '\t' in line or line.startswith(('---', '...')):
-            return False
-        if not line.startswith(' ') and not line.startswith('- '):
-            header = re.match(r"([A-Za-z0-9_-]+):(?:\s|$)", line)
-            if not header:
-                return False
-            inside = header[1] == 'rules'
-            if inside:
-                tail = line[header.end():].strip()
-                if found or (tail and not tail.startswith('#')):
-                    return False
-                found = True
-            continue
-        if not inside:
-            continue
-        item = re.fullmatch(r"( *)- (.+)", line)
-        if not item:
-            return False
-        indent = len(item[1])
-        if item_indent is not None and indent != item_indent:
-            return False
-        item_indent = indent
-        rule = scalar(item[2])
-        if any(ord(char) < 32 for char in rule):
-            return False
-        rules.append(rule)
-    required = {'3478', '5349', '19302'}
-    known = {'DOMAIN', 'DOMAIN-SUFFIX', 'DOMAIN-KEYWORD', 'DOMAIN-REGEX',
-             'GEOSITE', 'IP-CIDR', 'IP-CIDR6', 'GEOIP', 'SRC-IP-CIDR',
-             'SRC-PORT', 'DST-PORT', 'PROCESS-NAME', 'PROCESS-PATH', 'RULE-SET'}
-    for rule in rules:
-        parts = [part.strip() for part in rule.split(',')]
-        if parts[0] == 'MATCH' and len(parts) == 2:
-            policy = parts[1]
-        elif (parts[0] in known and len(parts) in (3, 4)
-              and (len(parts) == 3 or parts[3] == 'no-resolve')):
-            policy = parts[2]
-        else:
-            return False
-        if not all(parts) or policy != group:
-            return False
-        if parts[0] == 'DST-PORT' and len(parts) == 3:
-            required.discard(parts[1])
-        if not required:
-            return True
-    return False
-
-
-try:
-    valid = pinned(Path(sys.argv[1]).read_text(encoding='utf-8'), sys.argv[2])
-except (OSError, UnicodeError, ValueError):
-    valid = False
-sys.exit(0 if valid else 1)
-PY_STUN_RULES
+    merge_ok
 }
+# 当前 Clash 模式(rule/global/direct);读取失败返回空
+clash_mode() { clash_rules mode 2>/dev/null; }
 
 # 置顶规则行为检测:三个生态域名全部解析到 fake-ip 段(198.18.x.x)即视为已置顶;未命中域名记入 ROUTE_MISSED
 route_ok() {
@@ -988,18 +1293,14 @@ check() {
         *) fails="$fails;DNS未走隧道(返回${dnsip:-空})" ;;
     esac
 
-    wr=$(webrtc_test); wr_status=$?
-    case "$(webrtc_result "$wr" "$wr_status" "$ip")" in
-        matched) ;;
-        leak) fails="$fails;WebRTC返回与代理出口不一致的IP" ;;
-        no_response) fails="$fails;WebRTC未收到STUN响应,无法确认出口" ;;
-        *) fails="$fails;WebRTC检测异常或缺少有效出口IP" ;;
-    esac
+    wr=$(webrtc_status "$ip")
+    case "$wr" in fail:*) fails="$fails;WebRTC:${wr#fail:}" ;; esac
 
     launchctl print system/local.claude-bodyguard >/dev/null 2>&1 || fails="$fails;保镖未运行"
 
+    # 置顶规则:Clash Verge 验证运行内核;全局模式下全部流量走代理,规则不适用;其他客户端只看行为检测
     if [ "$PROXY_MODE" = "clash-verge" ]; then
-        { merge_ok || route_ok; } && stun_ok || fails="$fails;置顶规则或STUN端口配置缺失"
+        [ "$(clash_mode)" = "global" ] || merge_ok || fails="$fails;运行中置顶规则未验证"
     else
         route_ok || fails="$fails;置顶规则缺失(未命中:${ROUTE_MISSED# })"
     fi
@@ -1045,6 +1346,42 @@ elif status == '0' and raw.startswith('RESULT:'):
         pass
 print(result)
 PY_WEBRTC_RESULT
+}
+
+# 日常检查与修复共用此判断。先确认规则，再允许探测，避免向已知直连路径发包。
+webrtc_status() {
+    local verified result probe_rc assessment mode leak wips w
+    if [ "$PROXY_MODE" = "clash-verge" ]; then
+        mode=$(clash_mode)
+        # 全局模式不经过规则匹配,直接按"STUN 结果是否等于当前出口"判断
+        if [ "$mode" = "global" ]; then
+            result=$(webrtc_test); probe_rc=$?
+            assessment=$(webrtc_result "$result" "$probe_rc" "$1")
+            case "$assessment" in
+                matched) echo 'ok:仅暴露代理出口IP(全局模式)' ;;
+                no_response) echo 'warn:UDP 无响应,全局模式下无法验证(可能已被节点拦截)' ;;
+                leak) echo 'fail:STUN返回与当前代理出口不一致' ;;
+                *) echo 'fail:STUN结果异常或缺少有效出口IP' ;;
+            esac
+            return
+        fi
+        if ! verified=$(clash_rules verify 2>&1); then
+            echo "fail:运行规则未验证:${verified#FAIL:}"
+            return
+        fi
+    fi
+    result=$(webrtc_test)
+    probe_rc=$?
+    if [ "$PROXY_MODE" = "clash-verge" ]; then
+        assessment=$(clash_rules assess "$1" "$result" "$probe_rc" 2>/dev/null)
+    else
+        # 其他客户端的规则由用户管理，不能把 reject 的无响应视为已验证。
+        assessment=$(WEBRTC_POLICY=proxy clash_rules assess "$1" "$result" "$probe_rc" 2>/dev/null)
+    fi
+    case "$assessment" in
+        ok:*|fail:*) echo "$assessment" ;;
+        *) echo 'fail:无法评估 STUN 结果' ;;
+    esac
 }
 
 # 逐项输出检查结果(供UI使用): 名称=ok|fail:细节
@@ -1101,27 +1438,19 @@ checkdetail() {
         198.18.*) echo 'DNS=ok:走隧道' ;;
         *) echo "DNS=fail:未走隧道(${dnsip:-空})" ;;
     esac
-    wr=$(webrtc_test); wr_status=$?
-    case "$(webrtc_result "$wr" "$wr_status" "$ip")" in
-        matched) echo 'WebRTC=ok:STUN返回与代理出口一致' ;;
-        leak) echo 'WebRTC=fail:STUN返回与代理出口不一致' ;;
-        no_response) echo 'WebRTC=fail:未收到STUN响应,无法确认出口' ;;
-        *) echo 'WebRTC=fail:检测异常或缺少有效出口IP' ;;
-    esac
-
+    echo "WebRTC=$(webrtc_status "$ip")"
     if launchctl print system/local.claude-bodyguard >/dev/null 2>&1; then
         lastkill=$(tail -1 "$HOME/Library/Logs/claude-bodyguard.log" 2>/dev/null | cut -c1-40)
         echo "保镖=ok:${lastkill:-待命}"
     else
         echo '保镖=fail:未安装'
     fi
+    # 置顶规则:Clash Verge 验证运行内核;全局模式下规则不适用(全部流量已走代理)
     if [ "$PROXY_MODE" = "clash-verge" ]; then
-        if ! stun_ok; then
-            echo '规则置顶=fail:生成配置缺少STUN端口置顶规则'
+        if [ "$(clash_mode)" = "global" ]; then
+            echo '规则置顶=ok:全局模式(全部流量走代理)'
         elif merge_ok; then
-            echo '规则置顶=ok:生成配置已包含置顶规则'
-        elif route_ok; then
-            echo '规则置顶=ok:域名行为与STUN端口配置通过'
+            echo '规则置顶=ok'
         else
             echo '规则置顶=fail:未生效'
         fi
@@ -1165,106 +1494,19 @@ checkdetail() {
     fi
 }
 
-# 置顶规则写入(智能合并):不整文件覆盖,用户已有的 Merge 配置原样保留
-# 标记块自包含 prepend-rules 键+全部规则,重复执行幂等
-write_merge_rules() {
-    M="$CLASH_DIR/profiles/Merge.yaml"
-    B0="# >>> claude-switcher pinned rules >>>"
-    B1="# <<< claude-switcher pinned rules <<<"
-    mkdir -p "$CLASH_DIR/profiles"
-    # 置顶规则清单(缩进两格)
-    rules=""
-    for d in claude.ai claude.com anthropic.com claudeusercontent.com challenges.cloudflare.com datadoghq.com segment.io stripe.com stripe.network stripecdn.com intercom.io intercomcdn.com intercomassets.com; do
-        rules="$rules  - DOMAIN-SUFFIX,$d,$PROXY_GROUP
-"
-    done
-    # STUN/TURN 标准端口置顶:即使用户规则集把国内 STUN 域名判为直连,WebRTC 探测的 UDP 也必须进隧道
-    for p in 3478 5349 19302; do
-        rules="$rules  - DST-PORT,$p,$PROXY_GROUP
-"
-    done
-
-    # 首次:文件不存在,整文件写入
-    if [ ! -f "$M" ]; then
-        cat > "$M" <<MEOF
-# Profile Enhancement Merge Template for Clash Verge
-
-profile:
-  store-selected: true
-
-# Claude 全家族及生态域名置顶强制走代理(优先级高于任何国内规则集)
-$B0
-prepend-rules:
-$rules$B1
-MEOF
-        return 0
-    fi
-
-    # 已存在:备份后幂等替换(只在将要修改时备份)
-    cp "$M" "$M.bak.$(date +%Y%m%d%H%M%S)"
-    tmp="$M.cs.tmp"
-    cp "$M" "$tmp"
-    # 删除旧标记块(含标记行,兼容块在 prepend-rules 下缩进的情形)
-    if grep -qF "$B0" "$tmp"; then
-        awk -v b0="$B0" -v b1="$B1" '
-            index($0, b0) {inblock=1; next}
-            inblock && index($0, b1) {inblock=0; next}
-            !inblock
-        ' "$tmp" > "$tmp.out" && mv "$tmp.out" "$tmp"
-        # 清理孤立的 prepend-rules: 键(其后没有规则行,只剩空行/注释/EOF)
-        awk '
-            { L[NR]=$0 }
-            END {
-                for (i=1; i<=NR; i++) {
-                    if (L[i] ~ /^prepend-rules:/) {
-                        has=0
-                        for (j=i+1; j<=NR; j++) {
-                            if (L[j] ~ /^[ \t]*- /) { has=1; break }
-                            if (L[j] ~ /^[ \t]*$/ || L[j] ~ /^[ \t]*#/) continue
-                            break
-                        }
-                        if (!has) continue
-                    }
-                    print L[i]
-                }
-            }
-        ' "$tmp" > "$tmp.out" && mv "$tmp.out" "$tmp"
-    fi
-    # 注入:已有 prepend-rules: 则标记规则块(不带键)插到该行之后,否则文件顶部插入完整块
-    # 注意:多行文本走环境变量传递(macOS awk 的 -v 不支持含换行的字符串);先写中间文件再替换,失败不碰原文件
-    if grep -q '^prepend-rules:' "$tmp"; then
-        if MARK0="$B0" MARK1="$B1" RULES="$rules" awk '
-            /^prepend-rules:/ && !done {
-                print
-                print "  " ENVIRON["MARK0"]
-                printf "%s", ENVIRON["RULES"]
-                print "  " ENVIRON["MARK1"]
-                done=1
-                next
-            }
-            { print }
-        ' "$tmp" > "$tmp.out"; then
-            mv "$tmp.out" "$M" && rm -f "$tmp"
-        else
-            rm -f "$tmp" "$tmp.out"
-            return 1
-        fi
-    else
-        {
-            echo "# Claude 全家族及生态域名置顶强制走代理(优先级高于任何国内规则集)"
-            echo "$B0"
-            echo "prepend-rules:"
-            printf "%s" "$rules"
-            echo "$B1"
-            echo ""
-            cat "$tmp"
-        } > "$tmp.out" && mv "$tmp.out" "$M" && rm -f "$tmp"
-    fi
-    rm -f "$tmp"
-}
+# 保留隐藏入口供安装器调用;现在生成全局 Script.js 并迁移旧管理块。
+write_merge_rules() { clash_rules write; }
 
 # 一键修复:按项自动修复,每步输出结果
 fix() {
+    if [ "$PROXY_MODE" = "clash-verge" ]; then
+        local policy_result
+        if ! policy_result=$(clash_rules policy 2>&1); then
+            echo "FIX:WebRTC 策略无效 ✗ $policy_result"
+            return 1
+        fi
+        WEBRTC_POLICY="$policy_result"
+    fi
     echo "FIX:开始一键修复"
 
     # A. 代理内核 + TUN
@@ -1350,35 +1592,40 @@ ASEOF
         echo "FIX:地区格式 → $LOCALE_TARGET ✓"
     fi
 
-    # B2. 置顶规则缺失(含 STUN/TURN 端口) → Clash Verge 智能合并写入 Merge 配置并重启;其他客户端提示自行配置
-    if [ "$PROXY_MODE" = "clash-verge" ]; then
-        if ! merge_ok || ! stun_ok || ! route_ok; then
-            echo "FIX:写入置顶规则(智能合并,不动你的已有配置)..."
-            write_merge_rules
-            osascript -e 'tell application "Clash Verge" to quit' >/dev/null 2>&1
-            sleep 3
-            open -a "Clash Verge"
-            for i in $(seq 1 40); do
-                tun_up && break
-                sleep 1
-            done
-            if merge_ok && stun_ok; then
-                echo "FIX:置顶规则 ✓(生成配置已包含域名和STUN端口规则)"
-            else
-                echo "FIX:置顶规则 ✗(生成配置仍缺少域名或STUN端口规则)"
-            fi
+    # B2. 更新全局脚本并检查运行规则;写入失败或未加载均不能报成功。全局模式下规则不适用。
+    if [ "$PROXY_MODE" = "clash-verge" ] && [ "$(clash_mode)" = "global" ]; then
+        echo "FIX:全局模式,置顶规则不适用(全部流量已走代理) ✓"
+    elif [ "$PROXY_MODE" = "clash-verge" ]; then
+        echo "FIX:写入全局扩展脚本(保留已有 main 与无关配置)..."
+        local rules_result
+        if ! rules_result=$(write_merge_rules 2>&1); then
+            echo "FIX:置顶规则 ✗ $rules_result"
+            return 1
         fi
-    else
-        if ! route_ok; then
-            echo "FIX:置顶规则 ✗(未命中:${ROUTE_MISSED# }) — 请在 $(proxy_name) 中自行添加 DOMAIN-SUFFIX 置顶规则"
+        osascript -e 'tell application "Clash Verge" to quit' >/dev/null 2>&1
+        sleep 3
+        open -a "Clash Verge"
+        for i in $(seq 1 40); do tun_up && break; sleep 1; done
+        local loaded=0
+        for i in $(seq 1 5); do
+            if rules_result=$(clash_rules verify 2>&1); then loaded=1; break; fi
+            sleep 1
+        done
+        if [ "$loaded" -ne 1 ]; then
+            echo "FIX:置顶规则 ✗ 未验证内核加载:$rules_result"
+            echo "FIX:请检查全局扩展脚本是否启用、代理组是否存在，以及节点 UDP 支持"
+            return 1
         fi
+        echo "FIX:置顶规则 ✓ 已验证内核实际加载"
+    elif ! route_ok; then
+        echo "FIX:置顶规则 ✗ 请在 $(proxy_name) 中自行添加 DOMAIN-SUFFIX 置顶规则"
     fi
-
+    # C. 复测与日常审计共用判断；仅在确认泄漏时重载，再读取新的出口参照。
+    local fix_failed=0 wrtrace
     wrtrace=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null) || wrtrace=""
-    wrip=$(echo "$wrtrace" | grep '^ip=' | cut -d= -f2)
-    wr=$(webrtc_test); wr_status=$?
-    wr_result=$(webrtc_result "$wr" "$wr_status" "$wrip")
-    if [ "$wr_result" = "leak" ] && [ "$PROXY_MODE" = "clash-verge" ] && tun_up; then
+    wrip=$(printf '%s\n' "$wrtrace" | grep '^ip=' | cut -d= -f2)
+    wr=$(webrtc_status "$wrip")
+    if [[ "$wr" == fail:*不一致* ]] && [ "$PROXY_MODE" = "clash-verge" ] && tun_up; then
         echo "FIX:WebRTC 返回与代理出口不一致,重载 TUN 后复测..."
         osascript -e 'tell application "Clash Verge" to quit' >/dev/null 2>&1
         sleep 3
@@ -1386,15 +1633,12 @@ ASEOF
         for i in $(seq 1 30); do tun_up && break; sleep 1; done
         sleep 2
         wrtrace=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null) || wrtrace=""
-        wrip=$(echo "$wrtrace" | grep '^ip=' | cut -d= -f2)
-        wr=$(webrtc_test); wr_status=$?
-        wr_result=$(webrtc_result "$wr" "$wr_status" "$wrip")
+        wrip=$(printf '%s\n' "$wrtrace" | grep '^ip=' | cut -d= -f2)
+        wr=$(webrtc_status "$wrip")
     fi
-    case "$wr_result" in
-        matched) echo "FIX:WebRTC ✓ (STUN返回与当前代理出口一致)" ;;
-        leak) echo "FIX:WebRTC ✗ STUN返回与当前代理出口不一致,请检查TUN与UDP转发" ;;
-        no_response) echo "FIX:WebRTC ✗ 未收到STUN响应,无法确认出口或UDP是否被阻断" ;;
-        *) echo "FIX:WebRTC ✗ 检测异常或缺少有效出口IP,请检查网络与探针" ;;
+    case "$wr" in
+        ok:*) echo "FIX:WebRTC ✓ ${wr#ok:}" ;;
+        *) echo "FIX:WebRTC ✗ ${wr#fail:}"; fix_failed=1 ;;
     esac
 
     # D. 出口IP最终验证
@@ -1408,6 +1652,30 @@ ASEOF
         echo "FIX:出口IP ✗ (${ip:-无}/${loc:-未知},期望$COUNTRY_TARGET) — 可能是节点故障,请到 $(proxy_name) 里换条线路"
     fi
     echo "FIX:修复流程结束"
+    return "$fix_failed"
+}
+
+# 更换代理客户端:改写已安装脚本头部的 PROXY_MODE(用于安装后换客户端/装错客户端)
+set_client() {
+    mode="${1:-}"
+    case "$mode" in
+        clash-verge|shadowrocket|sing-box|clashx|surge|auto) ;;
+        *) echo "FAIL:用法: claude-switch.sh set-client <clash-verge|shadowrocket|sing-box|clashx|surge|auto>"; return 1 ;;
+    esac
+    target="${CLAUDE_SWITCHER_CORE:-}"
+    if [ -z "$target" ]; then
+        if [ -f "$HOME/.local/bin/claude-switch.sh" ] && [ -w "$HOME/.local/bin/claude-switch.sh" ]; then
+            target="$HOME/.local/bin/claude-switch.sh"
+        else
+            target="$0"
+        fi
+    fi
+    [ -f "$target" ] && [ -w "$target" ] || { echo "FAIL:找不到可写的核心脚本: $target"; return 1; }
+    sed -i '' "s|^PROXY_MODE=\"[^\"]*\"|PROXY_MODE=\"$mode\"|" "$target" || { echo "FAIL:写入失败"; return 1; }
+    grep -q "^PROXY_MODE=\"$mode\"" "$target" || { echo "FAIL:校验失败"; return 1; }
+    echo "OK:代理客户端已设为 $mode"
+    echo "INFO:重新运行 checkdetail 生效;非 Clash 客户端请在应用内自行添加 Claude 域名置顶规则"
+    return 0
 }
 
 # 地区自适应:按当前出口国家一键重设 国家/时区/地区格式(换了国家节点后运行)
@@ -1441,9 +1709,14 @@ set_region() {
     echo "OK:region=$loc process_tz=$ntz locale=$nlocale；系统时区由用户设置"
 }
 
-# 自动更新:拉取 main 分支最新代码,SHA256 校验+配置注入+自检+失败回滚(--auto 供 LaunchAgent 每12小时调用)
+# 自动更新:拉取 main 分支最新代码,SHA256 校验+配置注入+自检+失败回滚
+# --check 只检查不写入;--auto 供 LaunchAgent 每12小时调用(静默写 update.log)
 self_update() {
-    if [ "${1:-}" = "--auto" ]; then auto=1; else auto=0; fi
+    auto=0; check=0
+    case "${1:-}" in
+        --auto) auto=1 ;;
+        --check) check=1 ;;
+    esac
     # 路径全部从脚本自身位置推导,兼容旧版 LaunchDaemon(root) 混跑时 $HOME 不可靠的场景
     BIN=$(cd "$(dirname "$0")" && pwd)
     UHOME="${BIN%/.local/bin}"
@@ -1506,6 +1779,14 @@ PY_CODE_COMPILE
        diff <(strip_cfg "$BIN/claude-switch.sh") <(strip_cfg "$NEW/core/claude-switch.sh") >/dev/null 2>&1 && \
        cmp -s "$code_base/claude-code.py" "$NEW/core/claude-code.py"; then
         echo "OK:已是最新版本"; rm -rf "$tmpd"; return 0
+    fi
+
+    # 只读检查:不备份、不写文件、不物化守护脚本、不触发自检/回滚
+    if [ "$check" -eq 1 ]; then
+        stamp=$(stat -f '%Sm' -t '%Y-%m-%d' "$NEW/core/claude-switch.sh" 2>/dev/null)
+        [ -z "$stamp" ] && stamp=$(date '+%F')
+        echo "INFO:发现新版本 $stamp"
+        rm -rf "$tmpd"; return 0
     fi
 
     local helper_had=0
@@ -1606,11 +1887,223 @@ fingerprint() {
     echo "CanvasWebGL=info:原生检查读不到 Claude Electron 的渲染特征,请打开 Web 检测页 https://yoursjeyo.github.io/claude-switcher/ 查看 Canvas/WebGL 指纹"
 }
 
+# 账号快照加密导出/导入(macOS):AES-256 加密 DMG,密码只经 stdin 传递
+# 一次性隔离浏览器:独立临时 profile,禁用非代理 UDP,关闭后销毁;URL 仅允许 http/https
+# Claude Code CLI 体检:只读检测安装方式/版本/多份安装冲突,不执行卸载或重装
+cli_info() {
+    echo "# Claude Code CLI 体检 $(date '+%F %T')"
+    path=$(command -v claude 2>/dev/null)
+    if [ -n "$path" ]; then
+        real=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path" 2>/dev/null || echo "$path")
+        ver=$(perl -e 'alarm 4; exec @ARGV' "$real" --version 2>/dev/null | head -1)
+        [ -z "$ver" ] && ver=$(perl -e 'alarm 4; exec @ARGV' "$path" --version 2>/dev/null | head -1)
+        echo "CLI=ok:$path"
+        [ "$real" != "$path" ] && echo "CLI真实路径=info:$real"
+        echo "版本=ok:${ver:-未获取}"
+        case "$real" in
+            *".claude/local"*|*".local/share/claude"*) method="native(官方安装脚本)" ;;
+            *"/opt/homebrew/"*|*"/usr/local/Cellar/"*|*"/home/linuxbrew/"*) method="homebrew" ;;
+            *"node_modules"*|*".npm-global"*|*"/.bun/"*) method="npm/bun" ;;
+            *) method="未知(建议核对 PATH)" ;;
+        esac
+        echo "安装方式=info:$method"
+    else
+        echo "CLI=warn:PATH 中没有 claude 命令"
+        echo "安装方式=info:未安装(桌面版可能自带内置 CLI,见下)"
+    fi
+
+    bundled=$(ls -d "$HOME/Library/Application Support/Claude/claude-code"/* 2>/dev/null | tail -1)
+    if [ -n "$bundled" ]; then
+        echo "桌面版内置=ok:$(basename "$bundled")"
+    else
+        echo "桌面版内置=info:未发现(Claude 桌面版未安装或版本较旧)"
+    fi
+
+    if command -v npm >/dev/null 2>&1 && npm ls -g --depth=0 @anthropic-ai/claude-code >/dev/null 2>&1; then
+        echo "npm全局包=warn:检测到 @anthropic-ai/claude-code"
+    else
+        echo "npm全局包=ok:未检测到"
+    fi
+    if command -v brew >/dev/null 2>&1 && brew list --versions claude-code >/dev/null 2>&1; then
+        echo "Homebrew包=warn:$(brew list --versions claude-code 2>/dev/null | head -1)"
+    else
+        echo "Homebrew包=ok:未检测到"
+    fi
+
+    cfg="$HOME/.claude"
+    if [ -d "$cfg" ]; then
+        echo "配置目录=ok:$cfg ($(du -sh "$cfg" 2>/dev/null | cut -f1))"
+    else
+        echo "配置目录=info:未创建(尚未运行过 CLI)"
+    fi
+
+    [ -n "$path" ] && echo "建议=info:升级用对应包管理器(brew upgrade claude-code / npm i -g @anthropic-ai/claude-code@latest);卸载前先确认桌面版是否依赖它"
+    return 0
+}
+
+open_safe() {
+    url="${1:-}"
+    case "$url" in
+        http://*|https://*) ;;
+        '') echo "FAIL:用法: claude-switch.sh open-safe <http(s)://链接>"; return 1 ;;
+        *) echo "FAIL:只允许 http/https 链接"; return 1 ;;
+    esac
+    if [ "${CLAUDE_SWITCHER_SKIP_NET_CHECK:-0}" != "1" ] && ! tun_up && ! proxy_alive; then
+        echo "FAIL:代理未就绪(TUN 未接管且客户端未运行),拒绝打开以免直连"
+        return 1
+    fi
+    chrome="${CLAUDE_SWITCHER_CHROME:-}"
+    if [ -z "$chrome" ]; then
+        for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+                 "/Applications/Chromium.app/Contents/MacOS/Chromium" \
+                 "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
+                 "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"; do
+            [ -x "$c" ] && chrome="$c" && break
+        done
+    fi
+    [ -n "$chrome" ] && [ -x "$chrome" ] || { echo "FAIL:未找到 Chrome/Chromium/Edge/Brave"; return 1; }
+
+    profile=$(mktemp -d "${TMPDIR:-/tmp}/claude-switcher-safe.XXXXXX") || { echo "FAIL:无法创建临时 profile"; return 1; }
+    chmod 700 "$profile"
+    lang="${LOCALE_TARGET:-en_US}"; lang="${lang/_/-}"
+    nohup "$chrome" \
+        --user-data-dir="$profile" \
+        --no-first-run --no-default-browser-check \
+        --disable-sync --disable-extensions \
+        --force-webrtc-ip-handling-policy=disable_non_proxied_udp \
+        --lang="$lang" \
+        "$url" >/dev/null 2>&1 &
+    pid=$!
+    nohup bash -c 'while kill -0 "$1" 2>/dev/null; do sleep 5; done; rm -rf "$2"' _ "$pid" "$profile" >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    echo "OK:已在一次性隔离浏览器打开(profile 将在窗口关闭后销毁)"
+    echo "INFO:该窗口不继承你日常浏览器的 cookies/插件;在其中登录产生的会话会随窗口关闭一并丢弃"
+}
+
+snapshot_export() {
+    target="${1:-}"; out="${2:-}"; mode="${3:-}"
+    case "$target" in A|B|C|D) ;; *) echo "FAIL:账号必须是 A、B、C 或 D"; return 1 ;; esac
+    [ -d "$BASE/accounts/$target" ] || { echo "FAIL:账号$target 没有已归档快照(先切换一次让它归档)"; return 1; }
+    [ -n "$out" ] || { echo "FAIL:请指定导出文件路径"; return 1; }
+    case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
+    [ -e "$out" ] && { echo "FAIL:目标文件已存在,请换一个路径"; return 1; }
+    if [ "$(cat "$BASE/current" 2>/dev/null)" = "$target" ]; then
+        echo "FAIL:账号$target 正在使用中,当前数据在运行目录;请先切换到另一账号(会自动归档)再导出"
+        return 1
+    fi
+
+    if [ "$mode" = "--password-stdin" ]; then
+        IFS= read -r pass || true
+    else
+        printf '设置导出密码(至少 8 位): '; stty -echo 2>/dev/null; IFS= read -r pass; stty echo 2>/dev/null; echo
+        printf '再次输入: '; stty -echo 2>/dev/null; IFS= read -r pass2; stty echo 2>/dev/null; echo
+        [ "$pass" = "$pass2" ] || { echo "FAIL:两次密码不一致"; return 1; }
+    fi
+    if [ ${#pass} -lt 8 ]; then
+        unset pass pass2
+        echo "FAIL:密码至少 8 位"; return 1
+    fi
+
+    stage=$(mktemp -d)
+    if ! ditto "$BASE/accounts/$target/" "$stage/"; then
+        rm -rf "$stage"; unset pass pass2
+        echo "FAIL:复制快照失败"; return 1
+    fi
+    cat > "$stage/.claude-switcher-snapshot.json" <<EOF
+{"format":"claude-switcher-snapshot","version":1,"account":"$target","created":"$(date '+%F %T')"}
+EOF
+    if ! printf '%s\n' "$pass" | hdiutil create -srcfolder "$stage" -volname "ClaudeSnapshot-$target" \
+        -encryption AES-256 -stdinpass "$out" >/dev/null 2>&1; then
+        rm -rf "$stage"; rm -f "$out"; unset pass pass2
+        echo "FAIL:创建加密镜像失败"; return 1
+    fi
+    rm -rf "$stage"
+    # 加密镜像校验必须带密码,否则 macOS 会弹出图形密码框
+    if ! printf '%s\n' "$pass" | hdiutil verify -stdinpass "$out" >/dev/null 2>&1; then
+        rm -f "$out"; unset pass pass2
+        echo "FAIL:镜像校验失败"; return 1
+    fi
+    unset pass pass2
+    chmod 600 "$out"
+    echo "OK:账号$target 已加密导出到 $out"
+}
+
+snapshot_import() {
+    file="${1:-}"; target="${2:-}"; mode="${3:-}"
+    case "$target" in A|B|C|D) ;; *) echo "FAIL:账号必须是 A、B、C 或 D"; return 1 ;; esac
+    [ -f "$file" ] || { echo "FAIL:找不到镜像文件: $file"; return 1; }
+    [ -e "$BASE/accounts/$target" ] && { echo "FAIL:账号$target 已有快照,请先导出或删除后再导入"; return 1; }
+
+    if [ "$mode" = "--password-stdin" ]; then
+        IFS= read -r pass || true
+    else
+        printf '输入镜像密码: '; stty -echo 2>/dev/null; IFS= read -r pass; stty echo 2>/dev/null; echo
+    fi
+    [ -n "$pass" ] || { echo "FAIL:密码为空"; return 1; }
+
+    mnt=$(mktemp -d)
+    attached=0
+    if ! printf '%s\n' "$pass" | hdiutil attach -stdinpass -nobrowse -readonly -mountpoint "$mnt" "$file" >/dev/null 2>&1; then
+        unset pass; rm -rf "$mnt"
+        echo "FAIL:密码错误或镜像损坏"; return 1
+    fi
+    attached=1
+    unset pass
+
+    cleanup_import() {
+        [ "$attached" = "1" ] && hdiutil detach "$mnt" >/dev/null 2>&1
+        rm -rf "$mnt" "$BASE/accounts/$target.new"
+    }
+
+    marker="$mnt/.claude-switcher-snapshot.json"
+    if [ ! -f "$marker" ]; then
+        cleanup_import
+        echo "FAIL:不是本项目导出的快照镜像"; return 1
+    fi
+    if ! python3 - "$marker" "$target" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f: meta = json.load(f)
+assert meta.get("format") == "claude-switcher-snapshot"
+assert meta.get("version") == 1
+assert meta.get("account") in ("A", "B", "C", "D")
+sys.exit(0 if meta.get("account") == sys.argv[2] else 1)
+PY
+    then
+        cleanup_import
+        echo "FAIL:镜像元数据校验失败(账号不匹配或格式不支持)"; return 1
+    fi
+
+    rm -rf "$BASE/accounts/$target.new"
+    if ! ditto "$mnt" "$BASE/accounts/$target.new"; then
+        cleanup_import
+        echo "FAIL:复制到账号目录失败"; return 1
+    fi
+    rm -f "$BASE/accounts/$target.new/.claude-switcher-snapshot.json"
+    chmod 700 "$BASE/accounts/$target.new"
+    if ! mv "$BASE/accounts/$target.new" "$BASE/accounts/$target"; then
+        cleanup_import
+        echo "FAIL:写入账号目录失败"; return 1
+    fi
+    cleanup_import
+    echo "OK:已导入为账号$target(切换时生效)"
+}
+
 status() {
-    cur="none"; [ -f "$BASE/current" ] && cur=$(cat "$BASE/current")
-    hasA=0; [ -d "$BASE/accounts/A" ] && hasA=1
-    hasB=0; [ -d "$BASE/accounts/B" ] && hasB=1
-    echo "current=$cur hasA=$hasA hasB=$hasB"
+    local cur="none" hasA=0 hasB=0 hasC=0 hasD=0 a dir size stamp accounts="" extras=""
+    [ -f "$BASE/current" ] && cur=$(cat "$BASE/current")
+    [ -d "$BASE/accounts/A" ] && hasA=1
+    [ -d "$BASE/accounts/B" ] && hasB=1
+    [ -d "$BASE/accounts/C" ] && hasC=1
+    [ -d "$BASE/accounts/D" ] && hasD=1
+    for a in A B C D; do
+        dir="$BASE/accounts/$a"
+        [ -d "$dir" ] || continue
+        accounts="${accounts:+$accounts,}$a"
+        size=$(du -sh "$dir" 2>/dev/null | awk '{print $1}')
+        stamp=$(date -r "$dir" '+%Y-%m-%d' 2>/dev/null)
+        extras="$extras acc$a=${size:-?}@${stamp:-?}"
+    done
+    echo "current=$cur hasA=$hasA hasB=$hasB hasC=$hasC hasD=$hasD accounts=${accounts:-none}$extras"
 }
 
 quit_claude() {
@@ -1707,8 +2200,93 @@ launch_claude() {
     fi
 }
 
+# 只接受 A-D 四个账号槽位
+valid_account() {
+    case "${1:-}" in
+        A|B|C|D) return 0 ;;
+        *) echo "FAIL:账号必须是 A、B、C 或 D"; return 1 ;;
+    esac
+}
+
+# ---------- 跨身份保留(可选) ----------
+# 校验相对路径的每个分量都不是符号链接,避免把 DATA 外的内容带进快照
+keep_path_safe() {
+    local rel="$1" prefix="$DATA" part
+    while [ -n "$rel" ]; do
+        part="${rel%%/*}"
+        if [ "$part" = "$rel" ]; then rel=""; else rel="${rel#*/}"; fi
+        [ -z "$part" ] && continue
+        prefix="$prefix/$part"
+        [ -L "$prefix" ] && return 1
+    done
+    return 0
+}
+
+# 归档当前账号之前,把 keep 列表里存在的路径收进暂存目录
+stage_keep_paths() {
+    local keepf="$BASE/keep-in-workspace.txt"
+    local stage="$BASE/keep-stage"
+    local rel src dst count=0
+    KEEP_STAGED=0
+    [ -f "$keepf" ] || return 0
+    # 上次还原失败时 stage 可能是唯一完整副本,不自动覆盖
+    if [ -e "$stage" ] || [ -L "$stage" ]; then
+        log "FAIL:跨身份保留暂存目录已存在，请检查或重试上次切换: $stage"
+        return 1
+    fi
+    while IFS= read -r rel || [ -n "$rel" ]; do
+        rel="${rel%$'\r'}"
+        case "$rel" in
+            ''|'#'*|[[:space:]]*'#'*) continue ;;
+            /*) log "WARN:keep 路径必须是相对路径，已跳过: $rel"; continue ;;
+            *..*) log "WARN:keep 路径不能包含 ..，已跳过: $rel"; continue ;;
+        esac
+        while [ "${rel%/}" != "$rel" ]; do rel="${rel%/}"; done
+        while [ "${rel#./}" != "$rel" ]; do rel="${rel#./}"; done
+        if [ -z "$rel" ] || [ "$rel" = "." ]; then
+            log "WARN:keep 路径为空或指向数据目录本身，已跳过: $rel"
+            continue
+        fi
+        if ! keep_path_safe "$rel"; then
+            log "WARN:keep 路径含符号链接，已跳过: $rel"
+            continue
+        fi
+        src="$DATA/$rel"
+        [ -e "$src" ] || continue
+        dst="$stage/$rel"
+        if ! mkdir -p "$(dirname "$dst")" || ! ditto "$src" "$dst"; then
+            rm -rf "$stage"
+            log "FAIL:跨身份保留暂存失败"
+            return 1
+        fi
+        count=$((count + 1))
+    done < "$keepf"
+    if [ "$count" -eq 0 ]; then
+        rm -rf "$stage"
+        log "跨身份保留:没有需要保留的路径"
+        return 0
+    fi
+    KEEP_STAGED=$count
+    log "跨身份保留:已收起 $count 条路径"
+    return 0
+}
+
+# 还原目标账号后,把暂存内容合并回 DATA;失败时保留 stage 供排查
+restore_keep_paths() {
+    local stage="$BASE/keep-stage"
+    [ -d "$stage" ] || return 0
+    if ! ditto "$stage/" "$DATA/"; then
+        log "FAIL:跨身份保留还原失败，暂存保留在 $stage"
+        return 1
+    fi
+    rm -rf "$stage"
+    log "跨身份保留:已还原 ${KEEP_STAGED:-0} 条路径到新账号"
+    return 0
+}
+
 switch_to() {
-    target="$1"
+    target="${1:-}"
+    valid_account "$target" || return 1
     cur="none"; [ -f "$BASE/current" ] && cur=$(cat "$BASE/current")
     just_archived=0
 
@@ -1717,7 +2295,13 @@ switch_to() {
     # 首次运行:把当前登录中的状态收编为账号A
     if [ "$cur" = "none" ] && [ -d "$DATA" ] && [ -n "$(ls -A "$DATA" 2>/dev/null)" ]; then
         quit_claude || { echo "FAIL:Claude 未能退出，请手动退出后重试"; return 1; }
-        archive_current A || { echo "FAIL:首次账号归档失败，已停止切换"; return 1; }
+        if [ -s "$BASE/keep-in-workspace.txt" ]; then
+            stage_keep_paths || { echo "FAIL:跨身份保留暂存失败，已停止切换"; return 1; }
+        fi
+        archive_current A || {
+            rm -rf "$BASE/keep-stage"
+            echo "FAIL:首次账号归档失败，已停止切换"; return 1
+        }
         just_archived=1
         cur="A"; echo "$cur" > "$BASE/current"
         log "首次运行:当前登录状态已收编为账号A"
@@ -1725,9 +2309,18 @@ switch_to() {
     fi
 
     if [ "$cur" = "$target" ]; then
-        # 归档是移动语义,首次收编后需把当前账号还原回 DATA
-        if [ "$just_archived" = "1" ] && [ ! -d "$DATA" ] && [ -d "$BASE/accounts/$target" ]; then
-            copy_tree "$BASE/accounts/$target" "$DATA"
+        # 归档是移动语义;首次收编或上次切换中断后,先用存档恢复 DATA
+        if [ ! -d "$DATA" ]; then
+            if [ ! -d "$BASE/accounts/$target" ]; then
+                echo "FAIL:账号$target 数据目录缺失，已停止切换"; return 1
+            fi
+            if ! copy_tree "$BASE/accounts/$target" "$DATA"; then
+                echo "FAIL:账号$target 还原失败，已停止切换"; return 1
+            fi
+        fi
+        # 上次还原失败留下的 stage,在当前账号上重试合并
+        if [ -d "$BASE/keep-stage" ]; then
+            restore_keep_paths || { echo "FAIL:跨身份保留还原失败，暂存保留在 $BASE/keep-stage"; return 1; }
         fi
         launch_gate || return 1
         launch_claude || return 1
@@ -1738,20 +2331,45 @@ switch_to() {
     quit_claude || { echo "FAIL:Claude 未能退出，请手动退出后重试"; return 1; }
 
     if [ "$just_archived" = "0" ] && [ "$cur" != "none" ] && [ -d "$DATA" ]; then
-        archive_current "$cur" || { echo "FAIL:账号$cur 归档失败，已停止切换"; return 1; }
+        if [ -s "$BASE/keep-in-workspace.txt" ]; then
+            stage_keep_paths || { echo "FAIL:跨身份保留暂存失败，已停止切换"; return 1; }
+        fi
+        archive_current "$cur" || {
+            rm -rf "$BASE/keep-stage"
+            echo "FAIL:账号$cur 归档失败，已停止切换"; return 1
+        }
     fi
 
     rm -rf "$DATA.new"
     t0=$(date +%s)
     if [ -d "$BASE/accounts/$target" ]; then
-        copy_tree "$BASE/accounts/$target" "$DATA.new"
+        if ! copy_tree "$BASE/accounts/$target" "$DATA.new"; then
+            log "FAIL:账号$target 存档载入失败"
+            echo "FAIL:账号$target 存档载入失败，暂存保留在 $BASE/keep-stage"
+            return 1
+        fi
         log "已载入账号$target 存档 ($(( $(date +%s) - t0 ))s)"
     else
-        mkdir -p "$DATA.new"
+        if ! mkdir -p "$DATA.new"; then
+            log "FAIL:无法创建账号$target 数据目录"
+            echo "FAIL:无法创建账号$target 数据目录"
+            return 1
+        fi
         log "账号$target 无存档，将以全新状态初始化"
     fi
-    rm -rf "$DATA" && mv "$DATA.new" "$DATA"
+    if ! { rm -rf "$DATA" && mv "$DATA.new" "$DATA"; }; then
+        log "FAIL:载入账号$target 失败"
+        echo "FAIL:载入账号$target 失败，暂存保留在 $BASE/keep-stage"
+        return 1
+    fi
     echo "$target" > "$BASE/current"
+
+    if [ -d "$BASE/keep-stage" ]; then
+        if ! restore_keep_paths; then
+            echo "FAIL:跨身份保留还原失败，暂存保留在 $BASE/keep-stage"
+            return 1
+        fi
+    fi
 
     launch_gate || return 1
     launch_claude || return 1
@@ -1777,7 +2395,13 @@ case "${1:-}" in
     status) status ;;
     switch) switch_to "${2:-}" ;;
     set-region) set_region ;;
+    set-client) set_client "${2:-}" ;;
     update) self_update "${2:-}"; exit $? ;;
+    update-check) self_update --check ;;  # 只读检查;独立入口,避免旧版核心把 --check 当成真实更新
+    open-safe) open_safe "${2:-}" ;;
+    cli-info) cli_info ;;
+    snapshot-export) snapshot_export "${2:-}" "${3:-}" "${4:-}" ;;
+    snapshot-import) snapshot_import "${2:-}" "${3:-}" "${4:-}" ;;
     write-merge-rules) write_merge_rules ;;  # 隐藏入口:供安装器调用,保证两处合并逻辑一致
     fingerprint) fingerprint ;;
     subscription)

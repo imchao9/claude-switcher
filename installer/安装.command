@@ -174,6 +174,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
 	<key>LSMinimumSystemVersion</key><string>13.0</string>
 	<key>CFBundleIconFile</key><string>AppIcon</string>
 	<key>NSHighResolutionCapable</key><true/>
+	<key>LSUIElement</key><true/>
 </dict>
 </plist>
 EOF
@@ -229,11 +230,11 @@ if ! mv "$APP_PENDING" "$APP_DEST"; then
 fi
 echo "✓ App 已放到桌面"
 
-# ---- 5. 写入置顶规则(仅 Clash Verge;智能合并不覆盖已有配置;其他客户端自行配置) ----
+# ---- 5. 生成全局扩展脚本(仅 Clash Verge;保留已有 main 与无关配置) ----
 if [ "$MODE" = "clash-verge" ]; then
     # 复用核心脚本里的 write_merge_rules(隐藏入口),保证与 fix() 行为一致
     if "$H/.local/bin/claude-switch.sh" write-merge-rules; then
-        echo "✓ Claude 域名置顶规则已写入(智能合并,不动已有配置;重启 Clash Verge 后生效)"
+        echo "✓ 全局 Script.js 已写入(含 UDP 端口策略;保留已有 main;待重启后验证内核加载)"
     else
         fail "置顶规则写入失败，安装未完成。请检查 Clash 配置后重试。"
     fi

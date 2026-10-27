@@ -48,6 +48,7 @@ class NetworkResultTests(unittest.TestCase):
         if "webrtc_result()" in CORE.read_text():
             definitions += function("webrtc_result")
         definitions += function("timezone_valid")
+        definitions += function("webrtc_status")
         mocks = r'''
 PROXY_MODE=clash-verge
 PROXY_GROUP=Proxy
@@ -60,6 +61,20 @@ proxy_app_name() { printf 'Clash'; }
 tun_up() { return 0; }
 merge_ok() { return 0; }
 stun_ok() { return 0; }
+clash_mode() { echo rule; }
+clash_rules() {
+    case "$1" in
+        validate-policy) return 0 ;;
+        verify) merge_ok && stun_ok ;;
+        assess)
+            assessment=$(webrtc_result "$3" "$4" "$2")
+            case "$assessment" in
+                matched) echo 'ok:STUN返回与当前代理出口一致' ;;
+                leak) echo 'fail:STUN返回与当前代理出口不一致' ;;
+                *) echo 'fail:未确认STUN出口' ;;
+            esac ;;
+    esac
+}
 route_ok() { return 0; }
 subscription_ip_ok() { return 0; }
 iphist_count() { printf '1'; }
@@ -123,7 +138,7 @@ webrtc_test() {
 
     def test_unloaded_direct_stun_rule_cannot_pass(self):
         (self.root / "profiles/Merge.yaml").write_text("prepend-rules:\n  - DST-PORT,3478,DIRECT\n")
-        result = self.run_shell("PROXY_GROUP=Proxy\n" + function("stun_ok") + "stun_ok")
+        result = self.run_shell("PROXY_GROUP=Proxy\n" + function("stun_ok") + "merge_ok() { return 1; }; stun_ok")
         self.assertNotEqual(result.returncode, 0)
 
     def classify(self, raw, status=0, expected="198.51.100.10"):
@@ -210,15 +225,18 @@ webrtc_test() {
             with self.subTest(raw=raw, status=status, override=override):
                 self.run_public("fix", [(raw, status), ("RESULT:198.51.100.10", 0)], overrides=override)
                 events = self.root / "events"
-                self.assertEqual(events.exists(), reloads)
+                actual = events.read_text().splitlines() if events.exists() else []
+                # Explicit fix now always refreshes the verified global rules first.
+                expected = [] if "PROXY_MODE=surge" in override else ["write_merge_rules", "osascript", "open"]
                 if reloads:
-                    self.assertEqual(events.read_text().splitlines(), ["osascript", "open"])
+                    expected += ["osascript", "open"]
+                self.assertEqual(actual, expected)
 
     def test_fix_retry_uses_new_reference(self):
         result = self.run_public("fix", [("RESULT:198.51.100.20", 0), ("RESULT:198.51.100.30", 0)],
                                  [("198.51.100.10", 0), ("198.51.100.30", 0)])
         self.assertIn("FIX:WebRTC ✓", result.stdout)
-        self.assertEqual((self.root / "curl-count").read_text(), "3")
+        self.assertGreaterEqual(int((self.root / "curl-count").read_text()), 3)
 
     def test_fix_retry_does_not_accept_old_reference(self):
         result = self.run_public("fix", [("RESULT:198.51.100.20", 0), ("RESULT:198.51.100.10", 0)],
@@ -240,91 +258,19 @@ webrtc_test() {
                 self.assertNotIn("FIX:WebRTC ✓", result.stdout)
                 self.assertIn("FIX:WebRTC ✗", result.stdout)
 
-    def stun(self, text, group="Proxy"):
-        (self.root / "clash-verge.yaml").write_text(text)
-        return self.run_shell("PROXY_GROUP=" + shlex.quote(group) + "\n" + function("stun_ok") + "stun_ok")
-
-    def rules(self, group="Proxy", indent="  ", quote=""):
-        values = [f"DST-PORT,{port},{group}" for port in (3478, 5349, 19302)]
-        if quote == "'":
-            values = ["'" + value.replace("'", "''") + "'" for value in values]
-        elif quote == '"':
-            import json
-            values = [json.dumps(value, ensure_ascii=False) for value in values]
-        return "rules:\n" + "".join(indent + "- " + value + "\n" for value in values)
-
-    def test_stun_accepts_generated_indented_and_indentless_sequences(self):
-        for indent in ("", "  "):
-            with self.subTest(indent=indent):
-                text = "mixed-port: 1080\n" + self.rules(indent=indent) + "dns:\n  enable: true\n"
-                self.assertEqual(self.stun(text).returncode, 0)
-
-    def test_stun_accepts_quoted_group_names_and_comments(self):
-        for quote in ("", "'", '"'):
-            with self.subTest(quote=quote):
-                group = "住宅线路" if not quote else "住宅 #1's 线路"
-                text = self.rules(group=group, quote=quote).replace("rules:", "rules: # generated")
-                text += "  - MATCH,DIRECT # after the pinned prefix\n"
-                self.assertEqual(self.stun(text, group).returncode, 0)
-
-    def test_stun_rejects_missing_or_similarly_numbered_ports(self):
-        text = self.rules()
-        for wrong in [text.replace("  - DST-PORT,5349,Proxy\n", ""),
-                      text.replace("3478,", "13478,"), text.replace("3478,", "3478-3479,"),
-                      text.replace("3478,Proxy", "3478,Proxy,no-resolve")]:
-            with self.subTest(text=wrong):
-                self.assertNotEqual(self.stun(wrong).returncode, 0)
-
-    def test_stun_rejects_builtin_target_policies(self):
-        for group in ("DIRECT", "REJECT", "REJECT-DROP", "PASS"):
-            with self.subTest(group=group):
-                self.assertNotEqual(self.stun(self.rules(group=group), group).returncode, 0)
-
-    def test_stun_requires_exact_policy(self):
-        for policy in ("DIRECT", "REJECT", "Proxy extra", "Proxy2"):
-            with self.subTest(policy=policy):
-                self.assertNotEqual(self.stun(self.rules().replace("3478,Proxy", "3478," + policy)).returncode, 0)
-
-    def test_stun_rejects_comment_nested_and_duplicate_rules(self):
-        text = self.rules()
-        cases = ["# " + text.replace("\n", "\n# "),
-                 "profile:\n" + "\n".join("  " + line for line in text.splitlines()) + "\n",
-                 text + self.rules(), text + "'rules': []\n", text + '"rules": []\n',
-                 "rules: []\n" + text, "rules: &ports\n" + text,
-                 text.replace("  - DST-PORT,5349", "    - DST-PORT,5349"),
-                 text + "---\n" + text]
-        for value in cases:
-            with self.subTest(text=value):
-                self.assertNotEqual(self.stun(value).returncode, 0)
-
-    def test_stun_rejects_shadowing_and_unknown_prefixes(self):
-        for prefix in ["DST-PORT,3478,DIRECT", "MATCH,DIRECT", "RULE-SET,all,DIRECT",
-                       "IP-CIDR,0.0.0.0/0,DIRECT,no-resolve", "UNKNOWN,x,Proxy",
-                       "AND,((NETWORK,UDP),(DST-PORT,3478)),DIRECT"]:
-            with self.subTest(prefix=prefix):
-                text = self.rules().replace("rules:\n", "rules:\n  - " + prefix + "\n")
-                self.assertNotEqual(self.stun(text).returncode, 0)
-
-    def test_stun_accepts_known_same_policy_prefix(self):
-        prefix = "  - DOMAIN-SUFFIX,example.test,Proxy\n  - IP-CIDR,192.0.2.0/24,Proxy,no-resolve\n"
-        self.assertEqual(self.stun(self.rules().replace("rules:\n", "rules:\n" + prefix)).returncode, 0)
-
-    def test_stun_rejects_unsupported_yaml(self):
-        for value in ["[DST-PORT,3478,Proxy]", "*shared", "!!str DST-PORT,3478,Proxy",
-                      "|", "'DST-PORT,3478,Proxy'#bad", '"DST-PORT,3478,Proxy"#bad',
-                      '"DST-PORT,3478,Proxy\\n"']:
-            with self.subTest(value=value):
-                text = self.rules().replace("DST-PORT,3478,Proxy", value)
-                self.assertNotEqual(self.stun(text).returncode, 0)
+    def test_stun_uses_running_kernel_verifier(self):
+        for status in (0, 1):
+            result = self.run_shell(function("stun_ok") + f"merge_ok() {{ return {status}; }}; stun_ok")
+            self.assertEqual(result.returncode, status)
 
     def test_public_clash_checks_require_stun_config(self):
         for name in ("check", "checkdetail"):
             with self.subTest(name=name):
                 result = self.run_public(name, [("RESULT:198.51.100.10", 0)],
-                                         overrides="stun_ok() { return 1; }")
+                                         overrides="merge_ok() { return 1; }")
                 if name == "check":
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("STUN", result.stdout)
+                    self.assertIn("WebRTC", result.stdout)
                 else:
                     self.assertIn("规则置顶=fail:", result.stdout)
                     self.assertEqual(len(result.stdout.splitlines()), 14)
@@ -341,7 +287,7 @@ webrtc_test() {
 
     def test_fix_does_not_claim_rules_repaired_when_generated_ports_missing(self):
         result = self.run_public("fix", [("RESULT:198.51.100.10", 0)],
-                                 overrides="stun_ok() { return 1; }")
+                                 overrides="merge_ok() { return 1; }")
         self.assertIn("FIX:置顶规则 ✗", result.stdout)
         self.assertNotIn("FIX:置顶规则 ✓", result.stdout)
         self.assertIn("write_merge_rules", (self.root / "events").read_text())

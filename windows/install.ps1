@@ -76,7 +76,7 @@ $grp = 'GLOBAL'
 if ($PROXY_MODE -eq 'clash-verge' -and $CLASH_DIR) {
     $grp = $null
     $inGroups = $false; $name = $null
-    foreach ($line in Get-Content "$CLASH_DIR\clash-verge.yaml" -ErrorAction SilentlyContinue) {
+    foreach ($line in Get-Content "$CLASH_DIR\clash-verge.yaml" -Encoding UTF8 -ErrorAction SilentlyContinue) {
         if ($line -match '^proxy-groups:') { $inGroups = $true; continue }
         if ($inGroups -and $line -match '^[a-zA-Z]') { $inGroups = $false }
         if ($inGroups -and $line -match '- name:\s*(.+)') { $name = $Matches[1].Trim('"',"'",' ') }
@@ -85,6 +85,9 @@ if ($PROXY_MODE -eq 'clash-verge' -and $CLASH_DIR) {
     if (-not $grp) { $grp = Read-Host "未能自动识别代理组名,请打开 Clash Verge 查看后输入" }
     if (-not $grp) { $grp = 'GLOBAL' }
     Write-Host "[OK] 代理组: $grp" -ForegroundColor Green
+    if ($grp -match '[,\r\n]') {
+        Write-Host "[WARN] 代理组名包含逗号或换行,规则模式可能无法写入;请改名后重跑安装器" -ForegroundColor Yellow
+    }
 }
 
 # ---- 3. IANA 时区 -> Windows 时区ID ----
@@ -131,6 +134,17 @@ $core = $core -replace '\$PROXY_GROUP = "[^"]*"', ('$$PROXY_GROUP = "' + $grpEsc
 $utf8Bom = New-Object System.Text.UTF8Encoding -ArgumentList $true
 [System.IO.File]::WriteAllText("$BASE\claude-switch.ps1", $core, $utf8Bom)
 $PROXY_MODE | Out-File -Encoding ascii -NoNewline "$BASE\proxy-mode.txt"
+
+# 版本号由 release 打包时写入 zip 根的 VERSION;开发目录没有该文件则记为 unknown
+$versionSrc = Join-Path $PSScriptRoot '..\VERSION'
+if (-not (Test-Path -LiteralPath $versionSrc)) { $versionSrc = Join-Path $PSScriptRoot 'VERSION' }
+$appVersion = 'unknown'
+if (Test-Path -LiteralPath $versionSrc) {
+    $rawVersion = Get-Content -LiteralPath $versionSrc -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+    if ($null -ne $rawVersion -and ([string]$rawVersion).Trim()) { $appVersion = ([string]$rawVersion).Trim() }
+}
+[System.IO.File]::WriteAllText((Join-Path $BASE 'version.txt'), $appVersion, (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "[OK] 版本: $appVersion" -ForegroundColor Green
 Write-Host "[OK] 核心文件已安装到 $BASE (代理模式: $PROXY_MODE)" -ForegroundColor Green
 
 # ---- 5. 桌面快捷方式 ----
@@ -142,34 +156,10 @@ $sc.WorkingDirectory = $BASE
 $sc.Save()
 Write-Host "[OK] 桌面快捷方式已创建" -ForegroundColor Green
 
-# ---- 6. 置顶规则(仅 Clash Verge) ----
-if ($PROXY_MODE -eq 'clash-verge' -and $CLASH_DIR) {
-    New-Item -ItemType Directory -Force -Path "$CLASH_DIR\profiles" | Out-Null
-    @"
-profile:
-  store-selected: true
-
-prepend-rules:
-  - DOMAIN-SUFFIX,claude.ai,$grp
-  - DOMAIN-SUFFIX,claude.com,$grp
-  - DOMAIN-SUFFIX,anthropic.com,$grp
-  - DOMAIN-SUFFIX,claudeusercontent.com,$grp
-  - DOMAIN-SUFFIX,challenges.cloudflare.com,$grp
-  - DOMAIN-SUFFIX,datadoghq.com,$grp
-  - DOMAIN-SUFFIX,segment.io,$grp
-  - DOMAIN-SUFFIX,stripe.com,$grp
-  - DOMAIN-SUFFIX,stripe.network,$grp
-  - DOMAIN-SUFFIX,stripecdn.com,$grp
-  - DOMAIN-SUFFIX,intercom.io,$grp
-  - DOMAIN-SUFFIX,intercomcdn.com,$grp
-  - DOMAIN-SUFFIX,intercomassets.com,$grp
-  - DST-PORT,3478,$grp
-  - DST-PORT,5349,$grp
-  - DST-PORT,19302,$grp
-"@ | Out-File -Encoding utf8 "$CLASH_DIR\profiles\Merge.yaml"
-    Write-Host "[OK] Claude 域名置顶规则已写入(重启 Clash Verge 后生效)" -ForegroundColor Green
-} elseif ($PROXY_MODE -eq 'clash-verge') {
-    Write-Host "[WARN] 未找到 Clash Verge 配置目录,跳过置顶规则;请手动在 Clash Verge 中添加" -ForegroundColor Yellow
+# ---- 6. 置顶规则:安装阶段不再写 Merge.yaml/Script.js ----
+if ($PROXY_MODE -eq 'clash-verge') {
+    Write-Host "[OK] 未改动 Clash 规则;请安装后打开切换器点一次「一键修复」完成规则配置" -ForegroundColor Yellow
+    Write-Host "     修复会先识别 Clash 模式:全局/直连模式跳过规则,规则模式写入 profiles\Script.js" -ForegroundColor Yellow
 } else {
     Write-Host "[OK] 非 Clash Verge:请在你的代理客户端中为 Claude 域名添加置顶/直连规则" -ForegroundColor Yellow
 }
