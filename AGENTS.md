@@ -7,7 +7,7 @@
 
 ## 你的任务
 
-帮助用户在 macOS 上安装并配置「Claude 切换器」：一个带环境安检的 Claude 账号启动/切换工具。目标状态是：**用户双击桌面图标，14 项安全检查全部通过，可以正常启动 Claude**。
+帮助用户在 macOS 上安装并配置「Claude 切换器」：一个带环境安检的 Claude 账号启动/切换工具。目标状态是：**用户双击桌面图标，14 项检查无失败项，可以正常启动 Claude；进程时区未实测项保持提醒**。
 
 ## 开始之前：必须先确认的前置条件
 
@@ -26,15 +26,15 @@
 1. 把 `core/claude-switch.sh` 复制为 `~/.local/bin/claude-switch.sh`（可执行），把 `core/stun-probe.py` 放到 `~/.claude-switcher/`
 2. 探测代理客户端并写进脚本顶部 `PROXY_MODE="..."`：存在 Clash Verge 配置目录 → `clash-verge`；否则 `scutil --nc list` 有 Shadowrocket VPN 配置 → `shadowrocket`；都没有则让用户在 clash-verge/shadowrocket/sing-box/clashx/surge/auto 中选择
 3. Clash Verge 模式下，从 `clash-verge.yaml` 的 `proxy-groups:` 找第一个 `type: select` 的组名写进 `PROXY_GROUP="..."`（其他客户端跳过）
-4. 按出口 IP 自动锁定地区目标：`curl -s ipinfo.io/json` 的 country → `COUNTRY_TARGET`，timezone → `TZ_TARGET`，country 经映射表（US→en_US、JP→ja_JP、TW→zh_TW、HK→zh_HK、SG→en_SG、GB→en_GB、DE→de_DE、FR→fr_FR、KR→ko_KR、AU→en_AU、CA→en_CA，其余→en_US）→ `LOCALE_TARGET`，三项都写进脚本头部
-5. 参照 `daemons/` 目录的模板，物化保镖与时区看门狗脚本（把 `__HOME__` / `__TZ_TARGET__` / `__PROXY_MODE__` 替换为实际值），用 sudo 装入 **root 所有的** `/Library/Application Support/claude-switcher/`（chown root:wheel、chmod 755，用户态不可写防提权）；`local.claude-bodyguard` / `local.tz-watchdog` 两个 LaunchDaemon 安装到 `/Library/LaunchDaemons/`（plist 的 ProgramArguments 已写死指向系统目录，直接 cp 即可）。自动更新 `local.claude-update` 是**用户态 LaunchAgent**：plist 放 `~/Library/LaunchAgents/`，用 `launchctl bootstrap gui/$(id -u)` 注册，不走 root（模板 `daemons/local.claude-update.plist`，每 12 小时跑一次 `update --auto`）
-6. 现场编译界面 App（需要 Xcode 命令行工具，必须带 `-target` 否则新 SDK 产物在老系统拒启动）：
+4. 按出口 IP 自动锁定地区目标：`curl -s ipinfo.io/json` 的 country → `COUNTRY_TARGET`，timezone → 桌面启动进程的 `TZ_TARGET`，country 经映射表（US→en_US、JP→ja_JP、TW→zh_TW、HK→zh_HK、SG→en_SG、GB→en_GB、DE→de_DE、FR→fr_FR、KR→ko_KR、AU→en_AU、CA→en_CA，其余→en_US）→ `LOCALE_TARGET`，三项都写进脚本头部
+5. 从 `daemons/` 物化保镖脚本，把 `__HOME__` / `__PROXY_MODE__` 替换为实际值，装入 root:wheel、755 的 `/Library/Application Support/claude-switcher/`。只注册 `local.claude-bodyguard`。不安装或注册 `local.tz-watchdog`；获授权升级安装时停用旧时区服务。自动更新仍为用户态 `local.claude-update` LaunchAgent，每 12 小时运行。系统时区由用户设置，Agent 不执行 `systemsetup -settimezone`。
+6. 现场编译界面 App（需要 Xcode 命令行工具，显式传入 macOS SDK 以兼容独立 Swift 工具链，并带 `-target` 避免新 SDK 产物在老系统拒启动）：
    ```bash
-   swiftc -O -parse-as-library -target "$(uname -m)-apple-macos13.0" app/main.swift -o Claude切换器.app/Contents/MacOS/ClaudeSwitcher -framework SwiftUI -framework AppKit
+   swiftc -sdk "$(xcrun --sdk macosx --show-sdk-path)" -O -parse-as-library -target "$(uname -m)-apple-macos13.0" app/main.swift -o Claude切换器.app/Contents/MacOS/ClaudeSwitcher -framework SwiftUI -framework AppKit
    ```
    图标用 `assets/icon-2048.png` 经 sips 生成 iconset 再 `iconutil -c icns` 打进 `Contents/Resources/AppIcon.icns`，`Info.plist` 声明 `CFBundleIconFile`，最后 `codesign --force --deep -s -`
 7. Clash Verge 模式下把置顶规则写入「全局扩展配置」(Merge.yaml) 并重启 Clash Verge；其他客户端提示用户自行添加 DOMAIN-SUFFIX 置顶规则
-8. 时区与 IPv6（已是目标值则跳过对应命令）：`systemsetup -settimezone <TZ_TARGET>`、`networksetup -setv6off Wi-Fi`（需管理员）
+8. 系统时区由用户自行设置，不修改。IPv6 按现有安装流程检查，必要时 `networksetup -setv6off Wi-Fi`（需管理员）。
 9. 收尾自检：运行 `~/.local/bin/claude-switch.sh checkdetail` 确认各项状态
 
 日常维护命令：`check`（静默总检）/ `checkdetail`（14 项逐项）/ `fix`（一键修复）/ `switch A|B`（切换账号）/ `set-region`（换国家节点后重锁地区目标）/ `fingerprint`（设备指纹体检：字体地区特征/GPU/虚拟机；Canvas/WebGL 用 Web 检测页）/ `update [--auto]`（自动更新：`--auto` 由用户态 LaunchAgent 每 12 小时调用、输出落 `~/.claude-switcher/update.log`；手动跑则直接打印。流程：拉取 main → 逐项 SHA256 校验工件（对照仓库 SHA256SUMS，不符即中止）→ 剔除 5 个配置行比对去重 → 备份 .bak → 注入配置 → 守护脚本仅比对并提示 → 自检，含任何 `=fail` 自动回滚）
@@ -45,12 +45,34 @@
 
 隔离回归：`python3 -m unittest discover -s tests -v`。测试使用本机假 curl 和隔离 HOME，不使用真实登录资料或代理。
 
+## Claude Code（macOS）
+
+检测窗口可在 CLI 缺失时显式安装官方 Claude Code。`code install [--json]` 复用现有助手，固定使用官方原生安装入口；不在检查或 Antify 安装时自动执行。不接受账号、路由、时区或 Claude 透传参数。已有 CLI 保留，不自动升级或登录。安装后必须通过可执行文件与版本验证才能报告完成；取消不等于安装文件已回滚。CLI 查找共用 PATH 与 `~/.local/bin` 回退。
+
+开发验收使用假下载和隔离 HOME，不运行真实官方安装脚本，不用安装结果代替网络、登录或 Antify 保护验收。用户此前暂停 Claude 域名实测的要求仍适用。
+
+`code run [A|B] --timezone America/Chicago -- [Claude 参数]` 只为该子进程传入 `TZ`，不改系统时区。省略参数时保留已有环境和客户端配置。桌面版使用 `TZ_TARGET` 经 LaunchServices 传入环境，必须先退出旧进程；不能将传入值视为已验证渲染或原生组件采用。
+
+`bash core/claude-switch.sh code check [A|B]` 只读检查 CLI、账号目录、代理、TUN、出口国家和已配置的订阅绑定。`code run [A|B] -- [Claude 参数]` 检查通过后启动并监督本次进程组，不依赖桌面 App、桌面保镖或桌面版 14 项检查。运行期检查失败会终止该进程组；直接运行 `claude` 或 IDE 扩展不受此入口保护。
+
+A/B 通过官方 `CLAUDE_CONFIG_DIR` 使用 `~/.claude-switcher/code/A`、`B`，首次分别人工登录。不复制现有凭据、Keychain 或默认配置，不修改桌面账号存档结构。不带 API key 的 Console 登录不支持此目录隔离。省略 A/B 时保留现有默认配置选择。真实登录验收须单独说明，不用假 CLI 测试冒充。
+
+`core/claude-code.py` 是用户态会话监督器，安装器和更新器将其分发到 `~/.claude-switcher/claude-code.py`。变更时保持 `scripts/gen-sums.sh` 与 `SHA256SUMS` 包含此工件。维护者本机部署禁令同样适用该文件。旧更新器首次升级后需再执行一次新版 `update` 或重跑安装器才能补齐助手文件。
+
+## Antify 专用安装与检测
+
+用户选择 Antify 且不希望修改系统时区时，使用 `installer/安装Antify检测版.command` 或 `installer/安装.command --code-antify`。该入口在桌面安装前置条件之前分流，不检查 Claude.app、不执行系统时区、网络、后台服务或旧桌面切换器变更。`--dry-run` 不执行下载、编译、安装和启动。
+
+安装器验证官方 Antify DMG 的 Bundle ID、Team ID、签名和 Gatekeeper，保留已验证的 0.0.82 或更新版本。独立检测 App 为 `~/Desktop/ClaudeCode环境检测.app`，助手与核心副本在 `~/.claude-switcher/code-tools/`。更新重新执行专用安装器；旧更新器与卸载器不管理它。
+
+`code check [A|B] --route antify --json` 仅报告 CLI、目录、安装、扩展授权和待核验的路由与保护。不得发起 Claude 服务请求，不读取 Antify 私有数据库、凭据或配置。扩展已批准不能推断代理运行，路由与 Kill Switch 不自动通过。`code run --route antify` 拒绝启动。首次系统扩展与内容过滤器授权由用户决定，安装器不自动授权或改变 TUN。
+
 ## 验收标准（全部满足才算装完）
 
-- 终端执行 `~/.local/bin/claude-switch.sh checkdetail` 输出 14 行且全部 `=ok`
-- 双击桌面 App，界面全绿，能正常启动 Claude
-- `launchctl print system/local.claude-bodyguard`、`system/local.tz-watchdog` 与 `gui/$(id -u)/local.claude-update` 均能查到（服务已注册）
-- `/Library/Application Support/claude-switcher/` 下两个守护脚本属 root:wheel、权限 755，当前用户不可写
+- 终端执行 `~/.local/bin/claude-switch.sh checkdetail` 输出 14 行且无 `=fail`；进程时区实际采用情况保持 `warn`，不伪造已通过
+- 双击桌面 App，检查无失败项，能正常启动 Claude；提醒项仍按实际状态展示
+- 保镖 `system/local.claude-bodyguard` 与用户态更新 `gui/$(id -u)/local.claude-update` 已注册，旧 `system/local.tz-watchdog` 已停用
+- `/Library/Application Support/claude-switcher/` 下保镖脚本属 root:wheel、权限 755，当前用户不可写
 - 切换一次账号 B 再切回 A，A 的登录态完好
 
 ## 排障手册（以下全是实战中踩过的坑，按症状直接查）
@@ -58,7 +80,7 @@
 | 症状 | 根因 | 处理 |
 |---|---|---|
 | TUN 网卡消失、出口变回国内 | **Clash Verge 更新/异常重启会把 `enable_tun_mode` 重置为 false**（生产环境已发生 4 次） | 退出 App → 改 `verge.yaml` 为 true → 重启 App。切换器的一键修复已内置此逻辑 |
-| 时区总是自己变回去 | macOS 自动时区或未知程序改动（生产环境已抓 8 次） | 看门狗会自动回滚；查 `~/Library/Logs/tz-watchdog.log` 留痕 |
+| 时区总是自己变回去 | macOS 自动设置或遗留的时区看门狗 | 系统时区由用户设置；只在获授权后停用旧 `local.tz-watchdog`，不替用户设置目标时区 |
 | 检查结果显示 0/11、数据为空 | 中文日志被 `cut -c` 按字节截断产生非法 UTF-8，Swift 严格解码整体失败 | 脚本必须 `export LC_ALL=en_US.UTF-8`；界面端用容错解码 `String(decoding:as:)` |
 | 修改 App 后界面没变化 | 旧进程没死：App 关窗不退 + `pkill` 匹配中文路径会因 Unicode NFD 编码失配而静默失败 | 用 `pkill -x ClaudeSwitcher`（按进程名）；App 必须实现 `applicationShouldTerminateAfterLastWindowClosed` |
 | headless Chrome 做 WebRTC 检测无结果 | headless 模式 ICE 子系统不产出候选 | 不要走浏览器路线，用本项目的纯 Python STUN 探针 |

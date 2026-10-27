@@ -1,0 +1,72 @@
+# Public, non-functional fixture for local parser checks. Replace the node
+# values only in a private downloaded subscription; never commit credentials.
+mixed-port: 7890
+bind-address: 127.0.0.1
+allow-lan: false
+ipv6: false
+mode: rule
+log-level: warning
+proxies:
+  - name: example-gateway-reality
+    type: vless
+    server: reality.example.invalid
+    port: 443
+    uuid: 00000000-0000-4000-8000-000000000000
+    tls: true
+    servername: reality.example.invalid
+    skip-cert-verify: false
+    network: tcp
+    udp: false
+    flow: xtls-rprx-vision
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+      short-id: 12ab
+  - name: example-gateway-ws
+    type: vless
+    server: ws.example.invalid
+    port: 443
+    uuid: 00000000-0000-4000-8000-000000000001
+    tls: true
+    servername: ws.example.invalid
+    skip-cert-verify: false
+    network: ws
+    udp: false
+    ws-opts:
+      path: /managed-ws
+      headers:
+        Host: origin.example.invalid
+proxy-groups:
+  - name: CLAUDE-SWITCHER
+    type: select
+    proxies:
+      - example-gateway-reality
+      - example-gateway-ws
+rules:
+  - NETWORK,udp,REJECT
+  - DOMAIN-SUFFIX,claude.ai,CLAUDE-SWITCHER
+  - DOMAIN-SUFFIX,anthropic.com,CLAUDE-SWITCHER
+  - DOMAIN-SUFFIX,claude.com,CLAUDE-SWITCHER
+  - DOMAIN-SUFFIX,clau.de,CLAUDE-SWITCHER
+  - DOMAIN-SUFFIX,claudeusercontent.com,CLAUDE-SWITCHER
+  - MATCH,CLAUDE-SWITCHER
+dns:
+  enable: true
+  listen: 127.0.0.1:1053
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - localhost
+    - +.local
+    - +.lan
+  respect-rules: true
+  prefer-h3: false
+  use-hosts: false
+  use-system-hosts: false
+  default-nameserver:
+    - https://1.1.1.1/dns-query#DIRECT
+  proxy-server-nameserver:
+    - https://1.1.1.1/dns-query#DIRECT
+  nameserver:
+    - https://1.1.1.1/dns-query#CLAUDE-SWITCHER

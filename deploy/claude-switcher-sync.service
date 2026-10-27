@@ -1,0 +1,21 @@
+[Unit]
+Description=Reconcile subscription bindings through local 3X-UI API
+After=network-online.target x-ui.service claude-switcher.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/claude-switcher-sync
+ExecStart=/usr/bin/python3 -m server.xui_sync
+UMask=0077
+TimeoutStartSec=180
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/etc/x-ui /usr/local/x-ui/bin /var/lib/claude-switcher-sync /var/lib/claude-switcher-sync-status
+ReadOnlyPaths=/opt/claude-switcher-sync /etc/claude-switcher-sync
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=null
+StandardError=null
