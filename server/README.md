@@ -100,6 +100,8 @@ python3 -m server.inspect_host vpn-host1 --output /private/path/vpn-host1-profil
 
 升级旧数据库会增加服务器归属、网关配置及用户入口身份，保留原始代理凭据、用户 token 和绑定。历史未归属 IP 的旧直连订阅继续可用，这是迁移兼容例外。迁入云网关前先解除旧绑定；仅 SOCKS5 和 HTTP 资源可以设置云归属。旧直连配置中已经交付的家庭代理凭据需要另行轮换，迁移不能收回这些凭据。重复启动不会重建用户 UUID；旧库若含重复 IP，迁移将回滚并停止，需要先核对重复资源。
 
+切换器对 `https://sub.610247.xyz/sub/<43位令牌>/vpn-host1.yaml` 提供受限的旧静态订阅兼容模式。该模式只接受固定域名和完整路径，从旧配置的“住宅出口”节点读取预期 IP，并要求 Claude/Anthropic 规则先于所有 `DIRECT` 规则、最终 `MATCH` 仍指向代理组。它不会接受任意缺少绑定标记的订阅，也不会把旧配置转换成新的服务端用户绑定。兼容模式只用于迁移，交付后应改用新后台生成的 `/sub/cs_<token>/vpn-host1.yaml` 地址。
+
 管理接口为 `GET /api/servers`、`POST /api/servers` 和 `PUT /api/ips/{id}/server`。服务器写入字段为 `id`、`name`、`host`、可选 `region`、可选 `status` 及可选 `gateway`。已有服务器省略 `status` 或 `gateway` 时保留原值。`gateway: null` 清除网关，有绑定时不允许清除。IP 归属接口只接收 `server_id`，不改动其他节点配置。IP 与用户列表包含派生的服务器信息，不回显代理凭据或入口 UUID。
 
 ## 应用独立 TLS 云服务器配置

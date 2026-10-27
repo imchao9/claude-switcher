@@ -395,6 +395,73 @@ raise SystemExit(0 if valid else 1)
 PY_SUBSCRIPTION_VALIDATE
 }
 
+legacy_subscription_expected_ip() {
+    python3 - "$1" "$2" <<'PY_LEGACY_SUBSCRIPTION'
+import ipaddress
+import re
+import sys
+from urllib.parse import urlsplit
+
+url, body_path = sys.argv[1:]
+parts = urlsplit(url)
+if (parts.scheme != "https" or parts.hostname != "sub.610247.xyz"
+        or not re.fullmatch(r"/sub/[A-Za-z0-9_-]{43}/vpn-host1\.yaml", parts.path)
+        or parts.query or parts.fragment):
+    raise SystemExit(1)
+try:
+    text = open(body_path, encoding="utf-8").read()
+except (OSError, UnicodeError):
+    raise SystemExit(1)
+residential = False
+expected = None
+for line in text.splitlines():
+    name = re.match(r"\s*-\s+name:\s*(.+?)\s*$", line)
+    if name:
+        residential = name[1].strip() == "住宅出口"
+        continue
+    server = re.match(r"\s+server:\s*([^\s#]+)\s*$", line)
+    if residential and server:
+        expected = server[1]
+        break
+if expected is None:
+    raise SystemExit(1)
+try:
+    address = ipaddress.ip_address(expected)
+except ValueError:
+    raise SystemExit(1)
+if not address.is_global:
+    raise SystemExit(1)
+rules = []
+inside = False
+for line in text.splitlines():
+    if line.strip() == "rules:":
+        inside = True
+        continue
+    if inside and line and not line[0].isspace():
+        inside = False
+    if inside:
+        item = re.match(r"\s+-\s+(.+?)\s*$", line)
+        if item:
+            rules.append(item[1].strip().strip('"\''))
+protected = ("claude.ai", "anthropic.com", "claude.com", "clau.de", "claudeusercontent.com")
+matches = [rule.split(",") for rule in rules]
+groups = {parts[2] for parts in matches if len(parts) == 3 and parts[0] == "DOMAIN-SUFFIX"
+          and parts[1] in protected}
+if len(groups) != 1:
+    raise SystemExit(1)
+group = next(iter(groups))
+protected_indexes = [index for index, parts in enumerate(matches)
+                     if len(parts) == 3 and parts[0] == "DOMAIN-SUFFIX" and parts[1] in protected]
+direct_indexes = [index for index, parts in enumerate(matches)
+                  if len(parts) >= 3 and parts[2] == "DIRECT"]
+if (len(protected_indexes) != len(protected) or direct_indexes
+        and min(direct_indexes) < max(protected_indexes)
+        or not rules or rules[-1] != "MATCH," + group):
+    raise SystemExit(1)
+print(address)
+PY_LEGACY_SUBSCRIPTION
+}
+
 subscription_set() {
     local url=""
     # 只从 stdin 读取，避免 token 出现在 shell/Swift 进程参数。
@@ -438,28 +505,37 @@ subscription_fetch() {
         echo 'FAIL:订阅下载失败'
         return 1
     fi
-    local expected
+    local expected mode
     expected=$(awk 'tolower($1)=="x-claude-switcher-egress-ip:" {print $2; exit}' "$headers" | tr -d '\r')
-    [ -n "$expected" ] || { echo 'FAIL:订阅缺少绑定 IP 标记'; return 1; }
+    mode=managed
+    if [ -z "$expected" ]; then
+        expected=$(legacy_subscription_expected_ip "$url" "$body") || {
+            echo 'FAIL:订阅缺少绑定 IP 标记或不符合旧订阅兼容规则'
+            return 1
+        }
+        mode=legacy-static
+    fi
     grep -q '^proxies:' "$body" || { echo 'FAIL:订阅内容不是受支持的 Clash 配置'; return 1; }
     local out="$SUBSCRIPTION_FILE.tmp.$$"
     umask 077
     cp "$body" "$out" && chmod 600 "$out" && mv -f "$out" "$SUBSCRIPTION_FILE" || { rm -f "$out"; echo 'FAIL:无法保存订阅配置'; return 1; }
-    python3 - "$SUBSCRIPTION_MANIFEST.tmp.$$" "$SUBSCRIPTION_MANIFEST" "$expected" <<'PY_SUBSCRIPTION_FETCH'
+python3 - "$SUBSCRIPTION_MANIFEST.tmp.$$" "$SUBSCRIPTION_MANIFEST" "$expected" "$mode" <<'PY_SUBSCRIPTION_FETCH'
 import json
 import os
 import sys
 from datetime import datetime, timezone
-tmp, source, expected = sys.argv[1:]
+tmp, source, expected, mode = sys.argv[1:]
 with open(source, encoding="utf-8") as handle:
     doc = json.load(handle)
 doc["expected_ip"] = expected
+doc["subscription_mode"] = mode
 doc["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 with open(tmp, "w", encoding="utf-8") as handle:
     json.dump(doc, handle, ensure_ascii=False)
 os.chmod(tmp, 0o600)
 PY_SUBSCRIPTION_FETCH
     mv -f "$SUBSCRIPTION_MANIFEST.tmp.$$" "$SUBSCRIPTION_MANIFEST" || { rm -f "$SUBSCRIPTION_MANIFEST.tmp.$$"; echo 'FAIL:无法更新订阅状态'; return 1; }
+    [ "$mode" = legacy-static ] && echo 'INFO:已启用旧静态订阅兼容模式；请尽快迁移到新版 cs_ 订阅地址'
     echo 'OK:订阅已同步'
 }
 
@@ -590,7 +666,7 @@ PY_SUBSCRIPTION_PORTS
 
 subscription_status() {
     [ -f "$SUBSCRIPTION_MANIFEST" ] || { echo 'subscription=fail:未配置'; return 1; }
-    local expected updated
+    local expected updated mode
     expected=$(subscription_expected_ip)
     updated=$(python3 - "$SUBSCRIPTION_MANIFEST" <<'PY_SUBSCRIPTION_STATUS'
 import json, sys
@@ -601,7 +677,18 @@ except (OSError, ValueError, TypeError):
     print("")
 PY_SUBSCRIPTION_STATUS
 )
+    mode=$(python3 - "$SUBSCRIPTION_MANIFEST" <<'PY_SUBSCRIPTION_MODE'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        value = json.load(handle).get("subscription_mode", "managed")
+    print(value if isinstance(value, str) and value else "managed")
+except (OSError, ValueError, TypeError):
+    print("managed")
+PY_SUBSCRIPTION_MODE
+)
     [ -n "$expected" ] && echo 'subscription=ok:已配置' || echo 'subscription=warn:待同步'
+    echo "subscription_mode=$mode"
     [ -n "$updated" ] && echo "subscription_sync=$updated"
     [ -n "$expected" ] && echo 'subscription_binding=ok:已绑定独立出口 IP' || true
     subscription_ports

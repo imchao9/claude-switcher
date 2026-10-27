@@ -169,6 +169,70 @@ printf 'proxies:\\n  - name: user\\n    type: vless\\n    server: 198.51.100.10\
         self.assertEqual(list((self.home / ".claude-switcher").glob("subscription.headers.*")), [])
         self.assertEqual(list((self.home / ".claude-switcher").glob("subscription.body.*")), [])
 
+    def test_legacy_static_subscription_uses_trusted_compatibility_shape(self):
+        url = "https://sub.610247.xyz/sub/" + "a" * 43 + "/vpn-host1.yaml"
+        self.assertEqual(self.run_cli("subscription", "set", stdin=url + "\n").returncode, 0)
+        pgrep = self.bin / "pgrep"
+        pgrep.write_text("#!/bin/sh\nexit 0\n")
+        pgrep.chmod(0o755)
+        ifconfig = self.bin / "ifconfig"
+        ifconfig.write_text("#!/bin/sh\nprintf 'inet 198.18.0.2\\n'\n")
+        ifconfig.chmod(0o755)
+        curl = self.bin / "curl"
+        curl.write_text("""#!/bin/sh
+headers= body=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -D) headers=$2; shift 2 ;;
+    -o) body=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+: > "$headers"
+cat > "$body" <<'YAML'
+proxies:
+  - name: 住宅出口
+    type: socks5
+    server: 8.8.8.8
+    port: 1337
+  - name: vpn-host1
+    type: vless
+    server: 203.0.113.10
+    port: 443
+rules:
+  - DOMAIN-SUFFIX,claude.ai,VPN-HOST1
+  - DOMAIN-SUFFIX,anthropic.com,VPN-HOST1
+  - DOMAIN-SUFFIX,claude.com,VPN-HOST1
+  - DOMAIN-SUFFIX,clau.de,VPN-HOST1
+  - DOMAIN-SUFFIX,claudeusercontent.com,VPN-HOST1
+  - GEOIP,CN,DIRECT
+  - MATCH,VPN-HOST1
+YAML
+""")
+        curl.chmod(0o755)
+        result = self.run_cli("subscription", "fetch")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("旧静态订阅兼容模式", result.stdout)
+        manifest = json.loads((self.home / ".claude-switcher/subscription.json").read_text())
+        self.assertEqual(manifest["expected_ip"], "8.8.8.8")
+        self.assertEqual(manifest["subscription_mode"], "legacy-static")
+
+    def test_legacy_compatibility_does_not_accept_untrusted_host(self):
+        url = "https://other.example/sub/" + "a" * 43 + "/vpn-host1.yaml"
+        self.assertEqual(self.run_cli("subscription", "set", stdin=url + "\n").returncode, 0)
+        pgrep = self.bin / "pgrep"
+        pgrep.write_text("#!/bin/sh\nexit 0\n")
+        pgrep.chmod(0o755)
+        ifconfig = self.bin / "ifconfig"
+        ifconfig.write_text("#!/bin/sh\nprintf 'inet 198.18.0.2\\n'\n")
+        ifconfig.chmod(0o755)
+        curl = self.bin / "curl"
+        curl.write_text("#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do case \"$1\" in -D) h=$2; shift 2;; -o) b=$2; shift 2;; *) shift;; esac; done; : > \"$h\"; printf 'proxies:\\n' > \"$b\"\n")
+        curl.chmod(0o755)
+        result = self.run_cli("subscription", "fetch")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("不符合旧订阅兼容规则", result.stdout)
+
     def test_status_is_sanitized_and_clear_removes_local_secret(self):
         url = "https://sub.example.com/s/cs_private-token-123456"
         self.assertEqual(self.run_cli("subscription", "set", stdin=url + "\n").returncode, 0)
