@@ -40,6 +40,35 @@ final class FixtureDelegate: AppDelegate {
                 self.vm.showSettingsSheet = true
             }
         }
+        if CommandLine.arguments.contains("--cleanup") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.vm.showCleanupSheet = true
+            }
+            if CommandLine.arguments.contains("--cleanup-review") || CommandLine.arguments.contains("--cleanup-result") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    self.vm.cleanupSelection = ["desktop-data", "code-data"]
+                    self.vm.cleanupReview = true
+                    if CommandLine.arguments.contains("--cleanup-result") {
+                        self.vm.cleanupConfirmation = "移入废纸篓"
+                        self.vm.executeCleanup() // Only the explicitly supplied fake core is called.
+                    }
+                }
+            }
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--capture"), index + 1 < CommandLine.arguments.count {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                let window = self.mainWindow?.attachedSheet ?? self.mainWindow
+                if let view = window?.contentView,
+                   let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                    view.cacheDisplay(in: view.bounds, to: bitmap)
+                    if let data = bitmap.representation(using: .png, properties: [:]) {
+                        try? data.write(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+                        print("DEMO captured rendered window")
+                    }
+                }
+                NSApplication.shared.terminate(nil)
+            }
+        }
         if let window = mainWindow {
             print("DEMO window frame: \(window.frame), visible screen: \(window.screen?.visibleFrame ?? .zero)")
         }

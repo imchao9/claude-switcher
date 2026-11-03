@@ -205,6 +205,250 @@ if __name__ == "__main__":
 PY_SUPPORT
 fi
 
+# 清理入口独立分派：预览不创建状态、不探测网络、不写操作日志。
+if [ "${1:-}" = "cleanup-info" ] || [ "${1:-}" = "cleanup-data" ]; then
+    exec "${CLAUDE_SWITCHER_PYTHON:-python3}" - "$@" <<'PY_CLEANUP'
+"""Allowlisted macOS cleanup. Move to Trash; never recursively delete user data."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import sys
+import time
+import uuid
+
+SCOPES = ("desktop-data", "code-data", "desktop-app", "code-app", "archives")
+CONFIRMATION = "移入废纸篓"
+HOME = Path.home()
+BASE = HOME / ".claude-switcher"
+BUNDLE = "com.anthropic.claudefordesktop"
+
+
+def output(value):
+    print(json.dumps(value, ensure_ascii=False), flush=True)
+
+
+def safe_parents(path):
+    # Leaf links may be moved as links; ancestor links must never be followed.
+    return all(not parent.is_symlink() for parent in path.parents)
+
+
+def signature(path):
+    if not safe_parents(path):
+        return {"state": "blocked", "bytes": None, "identity": "ancestor-link"}
+    try:
+        value = path.lstat()
+    except FileNotFoundError:
+        return {"state": "missing", "bytes": 0, "identity": "missing"}
+    except OSError:
+        return {"state": "blocked", "bytes": None, "identity": "unreadable"}
+    identity = [value.st_dev, value.st_ino, value.st_mode, value.st_size, value.st_mtime_ns]
+    total = value.st_size
+    descendants = hashlib.sha256()
+    try:
+        if stat.S_ISDIR(value.st_mode):
+            total = 0
+            def failed(_):
+                raise OSError()
+            for root, dirs, files in os.walk(path, followlinks=False, onerror=failed):
+                dirs.sort()
+                for name in sorted(dirs + files):
+                    child = Path(root) / name
+                    info = child.lstat()
+                    total += info.st_size
+                    descendants.update(json.dumps([str(child.relative_to(path)), info.st_dev,
+                        info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns],
+                        ensure_ascii=True).encode())
+    except OSError:
+        return {"state": "blocked", "bytes": None, "identity": identity}
+    return {"state": "present", "bytes": total, "identity": identity,
+            "descendants": descendants.hexdigest()}
+
+
+def targets():
+    result = []
+    def add(scope, path):
+        result.append((scope, path))
+    for relative in (
+        "Application Support/Claude", "Caches/Claude", "Caches/" + BUNDLE,
+        "Preferences/" + BUNDLE + ".plist", "HTTPStorages/" + BUNDLE,
+        "HTTPStorages/" + BUNDLE + ".binarycookies", "WebKit/" + BUNDLE,
+        "Saved Application State/" + BUNDLE + ".savedState", "Logs/Claude",
+    ):
+        add("desktop-data", HOME / "Library" / relative)
+    # Reset the desktop pointer with its live data, so cleared sessions are not silently restored.
+    for relative in ("current", "last-check.txt", "lastip", "iphistory"):
+        add("desktop-data", BASE / relative)
+    for path in (HOME / ".claude", HOME / ".claude.json", HOME / ".claude.json.backup",
+                 BASE / "cli-accounts"):
+        add("code-data", path)
+    for path in (Path("/Applications/Claude.app"), HOME / "Applications/Claude.app"):
+        add("desktop-app", path)
+    for path in (HOME / ".local/bin/claude", HOME / ".local/share/claude"):
+        add("code-app", path)
+    add("archives", BASE / "accounts")
+    return result
+
+
+def inventory(with_signatures=False):
+    rows, digest, signatures = [], [], {}
+    for index, (scope, path) in enumerate(targets()):
+        metadata = signature(path)
+        signatures[str(index)] = metadata
+        display = "~/" + str(path.relative_to(HOME)) if path.is_relative_to(HOME) else str(path)
+        rows.append({"id": str(index), "scope": scope, "path": display,
+                     "state": metadata["state"], "bytes": metadata["bytes"]})
+        digest.append([scope, str(path), metadata])
+    token = hashlib.sha256(json.dumps(digest, sort_keys=True).encode()).hexdigest()
+    plan = {"version": 1, "token": token, "items": rows, "notes": [
+        "本地清理不会解除服务端风控或封禁。账号受限时请使用官方支持渠道。",
+        "所选文件移入废纸篓；清空废纸篓后无法通过本工具恢复。符号链接仅移动链接本身。",
+        "Claude Code 数据包含全部 A–D 配置、历史、插件及登录资料；项目内 .claude 不处理。",
+        "账号快照默认保留；它们仍可能包含旧登录资料。按需另选清理账号快照。",
+        "桌面数据包含本地设置与 MCP 配置；清理后账号指针会重置，需重新初始化。",
+        "钥匙串凭据、浏览器登录、外部 CLAUDE_CONFIG_DIR、系统辅助组件不自动处理。",
+        "程序权限不足时请在 Finder 中手动移入废纸篓；不会请求管理员权限。",
+    ], "manual": managed_installs()}
+    return (plan, signatures) if with_signatures else plan
+
+
+def managed_installs():
+    notes = []
+    executable = shutil.which("claude")
+    if executable:
+        real = os.path.realpath(executable)
+        if "/@anthropic-ai/claude-code/" in real:
+            notes.append("检测到 npm 安装：在终端执行 npm uninstall -g @anthropic-ai/claude-code")
+        elif "/Caskroom/claude-code/" in real or "/Cellar/claude-code/" in real:
+            notes.append("检测到 Homebrew 安装：在终端执行 brew uninstall claude-code")
+        elif not real.startswith(str(HOME / ".local/share/claude") + "/"):
+            notes.append("PATH 中还有其他 Claude Code 安装；请先用 cli-info 核对其安装方式并用原安装器卸载。")
+    notes.append("如通过 npm / Homebrew 安装且未在 PATH 中启用，请使用原包管理器卸载；此处仅自动处理 ~/.local 下的原生安装。")
+    return notes
+
+
+def processes():
+    result = subprocess.run(["ps", "-axo", "pid=,uid=,comm=,args="],
+                            capture_output=True, text=True, check=True, timeout=5)
+    found = []
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 4 or parts[1] != str(os.getuid()):
+            continue
+        command, args = parts[2], parts[3]
+        if (Path(command).name in ("claude", "claude.exe", "Claude")
+                or "Claude.app/Contents/" in args
+                or str(HOME / ".local/share/claude/versions") + "/" in line
+                or (Path(command).name in ("node", "bun") and
+                    "@anthropic-ai/claude-code/" in args)):
+            if int(parts[0]) != os.getpid():
+                found.append(int(parts[0]))
+    return found
+
+
+def pending_recovery():
+    paths = [BASE / "keep-stage", HOME / "Library/Application Support/Claude.new",
+             HOME / "Library/Application Support/Claude.old"]
+    for letter in "ABCD":
+        paths += [BASE / "accounts" / (letter + suffix) for suffix in (".new", ".previous")]
+    return any(path.exists() or path.is_symlink() for path in paths)
+
+
+def execute(args):
+    if len(args) != 3 or args[2] != CONFIRMATION:
+        output({"error": "需要预览令牌与确认文字：移入废纸篓"})
+        return 2
+    scopes = args[0].split(",")
+    if not scopes or len(scopes) != len(set(scopes)) or any(s not in SCOPES for s in scopes):
+        output({"error": "清理范围无效"})
+        return 2
+    if not safe_parents(BASE / "cli-operation.lock"):
+        output({"error": "状态目录包含符号链接，已停止"})
+        return 1
+    BASE.mkdir(mode=0o700, exist_ok=True)
+    lock = BASE / "cli-operation.lock"
+    try:
+        lock.mkdir(mode=0o700)
+    except FileExistsError:
+        output({"error": "其他 CLI 启动、账号切换或清理正在进行"})
+        return 1
+    try:
+        # Require users to quit explicitly. Never kill their active coding work.
+        if processes():
+            output({"error": "请完全退出 Claude 桌面端和全部 Claude Code 会话，再刷新预览重试"})
+            return 1
+        if pending_recovery():
+            output({"error": "发现待恢复账号快照或暂存数据，请先处理恢复现场"})
+            return 1
+        plan, signature_at_plan = inventory(with_signatures=True)
+        if plan["token"] != args[1]:
+            output({"error": "预览已变化，请刷新预览后重新确认"})
+            return 1
+        chosen = [(row, path) for row, (_, path) in zip(plan["items"], targets()) if row["scope"] in scopes]
+        if any(row["state"] == "blocked" for row, _ in chosen):
+            output({"error": "所选路径不可读取或父目录是符号链接，未移动任何数据"})
+            return 1
+        trash = HOME / ".Trash"
+        if trash.is_symlink() or not safe_parents(trash):
+            output({"error": "废纸篓路径不安全，未移动任何数据"})
+            return 1
+        trash.mkdir(mode=0o700, exist_ok=True)
+        destination = trash / ("Claude-cleanup-" + time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8])
+        destination.mkdir(mode=0o700)
+        mapping = {"items": [{"stored": row["id"], "original": row["path"]} for row, _ in chosen]}
+        # Save the recovery map BEFORE the first move, including for interruption/disk errors.
+        with (destination / "restore-map.json").open("x", encoding="utf-8") as handle:
+            os.chmod(destination / "restore-map.json", 0o600)
+            json.dump(mapping, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        results = []
+        for row, path in chosen:
+            item = {"path": row["path"], "state": "skip", "detail": "不存在"}
+            if row["state"] == "present":
+                # Do not follow symlinks or fall back to copy/delete across volumes.
+                try:
+                    if processes():
+                        raise RuntimeError("检测到 Claude 或 Claude Code 重新启动，后续项目未处理")
+                    if not safe_parents(path) or signature(path) != signature_at_plan[row["id"]]:
+                        raise RuntimeError("目标发生变化，请刷新预览")
+                    os.rename(path, destination / row["id"])
+                    item.update(state="ok", detail="已移入废纸篓")
+                except RuntimeError as error:
+                    item.update(state="fail", detail=str(error))
+                except subprocess.SubprocessError:
+                    item.update(state="fail", detail="无法确认运行中的会话，后续项目未处理")
+                except OSError:
+                    item.update(state="fail", detail="移动失败（权限或跨磁盘限制）；保留原路径，请手动处理")
+            results.append(item)
+            # Stop on failure; previously moved items remain recoverable, never claim all-or-nothing.
+            if item["state"] == "fail":
+                break
+        report = {"results": results, "recovery": "~/.Trash/" + destination.name,
+                  "complete": len(results) == len(chosen) and all(i["state"] != "fail" for i in results)}
+        output(report)
+        return 0 if report["complete"] else 1
+    finally:
+        lock.rmdir()
+
+
+try:
+    if sys.argv[1:] == ["cleanup-info"]:
+        output(inventory())
+    elif sys.argv[1:2] == ["cleanup-data"]:
+        raise SystemExit(execute(sys.argv[2:]))
+    else:
+        output({"error": "清理参数无效"})
+        raise SystemExit(2)
+except (OSError, subprocess.SubprocessError):
+    output({"error": "无法完成本地清理检查或移动，请检查权限；已移动的项目仍保留在废纸篓"})
+    raise SystemExit(1)
+PY_CLEANUP
+fi
+
 # 随现有单脚本更新分发;在任何账号状态读写、审计/修复/启动之前分派。
 if [ "${1:-}" = "diagnose-proxy" ]; then
     shift
@@ -2397,6 +2641,7 @@ restore_keep_paths() {
 switch_to() {
     target="${1:-}"
     valid_account "$target" || return 1
+    cli_lock_acquire || return 1
     cur="none"; [ -f "$BASE/current" ] && cur=$(cat "$BASE/current")
     just_archived=0
 
@@ -2523,7 +2768,7 @@ case "$operation" in
     set-check-config) "$0" _support config-set "${2:-}" ;;
     write-merge-rules) write_merge_rules ;;  # 隐藏入口:供安装器调用,保证两处合并逻辑一致
     fingerprint) fingerprint ;;
-    *) echo "用法: claude-switch.sh check|checkdetail|fix|status|switch A|B|C|D|set-region|set-client <mode>|update [--check|--auto]|update-check|fingerprint|snapshot-export <A|B|C|D> <file>|snapshot-import <file> <A|B|C|D>|open-safe <url>|cli-info|cli [args...]|cli-current|export-diagnostics <file>|get-check-config|set-check-config <json>|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
+    *) echo "用法: claude-switch.sh check|checkdetail|fix|status|switch A|B|C|D|set-region|set-client <mode>|update [--check|--auto]|update-check|fingerprint|snapshot-export <A|B|C|D> <file>|snapshot-import <file> <A|B|C|D>|open-safe <url>|cli-info|cli [args...]|cli-current|cleanup-info|cleanup-data <scopes> <token> <移入废纸篓>|export-diagnostics <file>|get-check-config|set-check-config <json>|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
 esac
 rc=$?
 case "$operation" in

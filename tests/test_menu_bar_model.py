@@ -8,6 +8,8 @@ import unittest
 
 PROJECT = Path(__file__).resolve().parents[1]
 SCENARIOS = (
+    "cleanup_preview_only", "cleanup_confirmation_gate", "cleanup_execution_and_guard",
+    "cleanup_failure_preserved", "cleanup_preflight_error", "cleanup_bad_plan",
     "language_system_readback", "language_order_and_override", "language_inherited_and_unavailable", "language_refresh_and_open",
     "language_audit_detail", "language_skip_no_read", "language_failure_preserved",
     "startup_once", "multi_account_status", "first_use_cd_note", "legacy_status_fallback",

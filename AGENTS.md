@@ -45,6 +45,14 @@
 
 跨身份保留（可选，默认关闭）：`~/.claude-switcher/keep-in-workspace.txt` 每行一个相对 Claude 数据目录的路径（如 `settings.json`、`skills/`），`#` 注释、空行忽略。切换时先收进 `~/.claude-switcher/keep-stage/`，还原目标账号后合并回去；绝对路径、含 `..` 和符号链接会跳过并记 WARN。文件不存在或为空时行为与未启用完全一致。只放通用配置，不要放登录态/缓存等账号专属文件。
 
+## 本地数据清理（macOS）
+
+App 主窗口和菜单栏提供「清理 Claude / Claude Code」。`cleanup-info` 只读输出预览 JSON；`cleanup-data <逗号分隔范围> <token> <移入废纸篓>` 执行用户确认的范围。范围为 `desktop-data`、`code-data`、`desktop-app`、`code-app`、`archives`，默认全部不选；账号快照仅在显式选择 `archives` 时整体移入废纸篓，内部结构不变。
+
+先完全退出 Claude 与全部 Code 会话，不自动杀进程。预览过期、操作锁冲突、待恢复快照、父目录符号链接或进程检测失败时拒绝执行。仅将明确列出的项目改名移入 `~/.Trash/Claude-cleanup-*`，移动前持久化 `restore-map.json`；权限或跨盘失败停止后续项目并报告部分结果，不提权、不永久删除。不要针对真实账号运行清理来验证功能；用 `tests/test_cleanup_data.py` 的合成 HOME 与假进程。UI 隔离演示可用 `tests/MenuBarFixture.swift --cleanup`，必须显式传入假核心路径。
+
+npm/Homebrew 卸载、钥匙串、浏览器、项目 `.claude`、外部 `CLAUDE_CONFIG_DIR` 和系统辅助组件需人工处理，不得声称已清除全部凭据。本地清理不能解除服务端风控。核心与 GUI 必须同时升级；现有核心自动更新不替换 App。Windows/Linux 暂未提供此清理入口。
+
 ## 独立代理诊断
 
 `bash core/claude-switch.sh diagnose-proxy --config /path/to/private-proxy.json` 只验证明确指定代理到 Claude 网页/API 的无认证传输，详见 README。它可直接从仓库运行，不适用上述安装/启动前置条件，不启动或关闭应用，不创建账号状态、不修改系统设置。输出 JSON；401/403 分别标注认证或访问状态，传输到达不等于账号可用、启动许可或防泄漏通过。不要为运行诊断先安装后台或改 TUN/时区。

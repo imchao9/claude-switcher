@@ -21,6 +21,38 @@ struct CoreResult {
     let succeeded: Bool
 }
 
+struct CleanupItem: Decodable, Identifiable {
+    let id: String
+    let scope: String
+    let path: String
+    let state: String
+    let bytes: Int64?
+
+    var sizeLabel: String {
+        guard let bytes else { return "无法估算" }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+}
+
+struct CleanupPlan: Decodable {
+    let version: Int
+    let token: String
+    let items: [CleanupItem]
+    let notes: [String]
+    let manual: [String]
+}
+
+struct CleanupReport: Decodable {
+    struct Item: Decodable {
+        let path: String
+        let state: String
+        let detail: String
+    }
+    let results: [Item]
+    let recovery: String
+    let complete: Bool
+}
+
 struct AccountStamp: Equatable {
     let size: String
     let date: String
@@ -119,6 +151,94 @@ final class VM: ObservableObject {
     @Published private(set) var languagePreferences = LanguagePreferences(system: nil, claude: nil)
     @Published private(set) var languageSettingsMessage = ""
 
+    @Published var showCleanupSheet = false
+    @Published private(set) var cleanupPlan: CleanupPlan?
+    @Published var cleanupSelection: Set<String> = []
+    @Published var cleanupConfirmation = ""
+    @Published var cleanupReview = false
+    @Published private(set) var cleanupBusy = false
+    @Published private(set) var cleanupMessage = ""
+    @Published private(set) var cleanupReport: CleanupReport?
+
+    static let cleanupScopes: [(key: String, label: String, detail: String)] = [
+        ("desktop-data", "Claude 桌面端数据", "登录资料、设置、MCP 配置、缓存和日志；重置当前账号指针"),
+        ("code-data", "Claude Code 数据", "全部 A–D 的配置、会话历史、插件和登录资料"),
+        ("desktop-app", "Claude 桌面端程序", "/Applications 与个人 Applications 中的 Claude.app"),
+        ("code-app", "Claude Code 原生程序", "~/.local/bin/claude 与 ~/.local/share/claude；包管理器安装见下方"),
+        ("archives", "A–D 桌面账号快照", "包含旧登录资料；默认保留，仅在不再需要时勾选"),
+    ]
+
+    var cleanupChosen: [CleanupItem] {
+        cleanupPlan?.items.filter { cleanupSelection.contains($0.scope) } ?? []
+    }
+    var canReviewCleanup: Bool {
+        !isBusy && !cleanupBusy && cleanupPlan != nil && !cleanupSelection.isEmpty &&
+            cleanupChosen.contains { $0.state == "present" } &&
+            !cleanupChosen.contains { $0.state == "blocked" }
+    }
+    var canExecuteCleanup: Bool {
+        canReviewCleanup && cleanupReview && cleanupConfirmation == "移入废纸篓"
+    }
+
+    func loadCleanupPlan() {
+        guard !isBusy, !cleanupBusy, coreAvailable() else { return }
+        hideAfterSwitch?.cancel()
+        cleanupBusy = true
+        isBusy = true
+        cleanupPlan = nil
+        cleanupReport = nil
+        cleanupReview = false
+        cleanupConfirmation = ""
+        cleanupMessage = "正在扫描本地路径…"
+        run(["cleanup-info"], timeout: operationTimeout) { result in
+            defer { self.cleanupBusy = false; self.isBusy = false }
+            guard result.succeeded, let data = result.output.data(using: .utf8),
+                  let plan = try? JSONDecoder().decode(CleanupPlan.self, from: data),
+                  plan.version == 1, plan.token.count == 64 else {
+                self.cleanupMessage = "无法读取清理预览。请确认核心脚本与界面均已更新。"
+                return
+            }
+            self.cleanupPlan = plan
+            self.cleanupMessage = "选择需要清理的项目，再查看确认清单。"
+        }
+    }
+
+    func executeCleanup() {
+        guard canExecuteCleanup, let plan = cleanupPlan else { return }
+        let scopes = Self.cleanupScopes.map { $0.key }.filter { cleanupSelection.contains($0) }
+        hideAfterSwitch?.cancel()
+        cleanupBusy = true
+        isBusy = true
+        cleanupMessage = "正在移入废纸篓，请保持 Claude 与 Claude Code 退出…"
+        run(["cleanup-data", scopes.joined(separator: ","), plan.token, cleanupConfirmation], timeout: operationTimeout) { result in
+            defer { self.cleanupBusy = false; self.isBusy = false }
+            self.cleanupConfirmation = ""
+            // run() may prefix nonzero results with an exit-code explanation.
+            let json = result.output.range(of: "{").map { String(result.output[$0.lowerBound...]) } ?? ""
+            if let data = json.data(using: .utf8),
+               let report = try? JSONDecoder().decode(CleanupReport.self, from: data) {
+                self.cleanupReport = report
+                self.cleanupMessage = result.succeeded && report.complete
+                    ? "所选项目已处理。已移动的数据保留在废纸篓。"
+                    : "部分项目未完成，后续项目已停止。请查看逐项结果。"
+            } else if let data = json.data(using: .utf8),
+                      let value = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+                      let error = value["error"] {
+                self.cleanupMessage = error
+            } else {
+                self.cleanupMessage = "未收到完整清理结果，请检查废纸篓后刷新预览。"
+            }
+            self.cleanupPlan = nil // A plan is single-use, including a failed attempt.
+            self.cleanupReview = false
+            self.phase = .failed
+            self.lastCheckSummary = "清理后需重新检查"
+            self.banner = "本地数据发生变化或清理未完成，请关闭清理窗口后重新检查。"
+            self.current = "未知"
+            self.archived = []
+            self.stamps = [:]
+        }
+    }
+
     static let optionalChecks: [(key: String, label: String)] = [
         ("IP一致", "IP 与上次一致"),
         ("DNS", "DNS 走隧道"),
@@ -161,7 +281,7 @@ final class VM: ObservableObject {
         self.languageSettingsOpener = languageSettingsOpener
     }
 
-    var canQuit: Bool { !switchRequested && phase != .fixing && phase != .switching }
+    var canQuit: Bool { !cleanupBusy && !switchRequested && phase != .fixing && phase != .switching }
 
     func start() {
         guard !started else { return }
@@ -708,6 +828,7 @@ struct ContentView: View {
                     VStack(spacing: 16) {
                         checksCard
                         clientCard
+                        cleanupEntry
                         if vm.phase == .ready || vm.phase == .switching || vm.phase == .done {
                             accountCard
                         } else if vm.coreMissing {
@@ -724,6 +845,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showAIPrompt) { AIPromptSheet(text: vm.aiPrompt) }
         .sheet(isPresented: $vm.showSettingsSheet) { CheckSettingsView(vm: vm) }
+        .sheet(isPresented: $vm.showCleanupSheet) { CleanupView(vm: vm) }
         .frame(width: 440, height: height)
         .preferredColorScheme(.light)
     }
@@ -789,6 +911,28 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showNotice) { NoticeView() }
         .sheet(isPresented: $showFingerprint) { FingerprintView(text: vm.fingerprint) }
+    }
+
+    var cleanupEntry: some View {
+        Button { vm.showCleanupSheet = true } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "trash").foregroundColor(ClaudeTheme.terracottaDeep)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("清理 Claude / Claude Code").font(.callout.weight(.semibold))
+                    Text("查看程序与本地数据，选择后再确认").font(.caption).foregroundColor(ClaudeTheme.muted)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption)
+            }
+            .foregroundColor(ClaudeTheme.ink)
+            .padding(12)
+            .background(ClaudeTheme.card)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(ClaudeTheme.cardBorder))
+        }
+        .buttonStyle(.plain)
+        .disabled(vm.isBusy)
+        .accessibilityIdentifier("cleanup-entry")
     }
 
     var statusPill: some View {
@@ -1086,6 +1230,131 @@ struct ContentView: View {
         }
         .foregroundColor(ClaudeTheme.muted)
         .sheet(isPresented: $vm.showUpdateSheet) { UpdateSheet(vm: vm) }
+    }
+}
+
+// MARK: - 本地数据清理
+
+struct CleanupView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var vm: VM
+
+    var body: some View {
+        ZStack {
+            ClaudeBackground()
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(vm.cleanupReview ? "确认清理范围" : "清理 Claude / Claude Code").font(.title3.bold())
+                        Text("本地清理不会解除服务端风控或封禁").font(.caption).foregroundColor(ClaudeTheme.error)
+                    }
+                    Spacer()
+                    Button("关闭") { dismiss() }.disabled(vm.cleanupBusy)
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        if let report = vm.cleanupReport {
+                            reportView(report)
+                        } else if let plan = vm.cleanupPlan {
+                            if vm.cleanupReview {
+                                reviewView
+                            } else {
+                                selectionView(plan)
+                            }
+                        }
+                        if !vm.cleanupReview || vm.cleanupBusy {
+                            Text(vm.cleanupMessage).font(.callout).foregroundColor(ClaudeTheme.ink)
+                                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Divider()
+                HStack {
+                    if vm.cleanupBusy { ProgressView().controlSize(.small) }
+                    Button("刷新预览") { vm.loadCleanupPlan() }.disabled(vm.isBusy)
+                    Spacer()
+                    if vm.cleanupReview {
+                        Button("返回选择") { vm.cleanupReview = false; vm.cleanupConfirmation = "" }.disabled(vm.cleanupBusy)
+                        Button("确认移入废纸篓", role: .destructive) { vm.executeCleanup() }
+                            .disabled(!vm.canExecuteCleanup)
+                    } else {
+                        Button("查看确认清单") { vm.cleanupReview = true; vm.cleanupConfirmation = "" }
+                            .buttonStyle(.borderedProminent).tint(ClaudeTheme.terracottaDeep)
+                            .disabled(!vm.canReviewCleanup)
+                    }
+                }
+            }.padding(20)
+        }
+        .frame(width: 620, height: 650)
+        .preferredColorScheme(.light)
+        .interactiveDismissDisabled(vm.cleanupBusy)
+        .onAppear { vm.cleanupSelection = []; vm.loadCleanupPlan() }
+    }
+
+    private func selectionView(_ plan: CleanupPlan) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("先完全退出 Claude 和全部 Claude Code 会话。首次使用和日常切换无需清理；账号受限时可先导出诊断并联系官方支持。")
+                .font(.callout).fixedSize(horizontal: false, vertical: true)
+            ForEach(VM.cleanupScopes, id: \.key) { scope in
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle(isOn: Binding(get: { vm.cleanupSelection.contains(scope.key) }, set: { enabled in
+                        if enabled { vm.cleanupSelection.insert(scope.key) } else { vm.cleanupSelection.remove(scope.key) }
+                    })) {
+                        Text(scope.label).font(.callout.bold())
+                    }.disabled(vm.cleanupBusy)
+                    Text(scope.detail).font(.caption).foregroundColor(ClaudeTheme.muted)
+                    ForEach(plan.items.filter { $0.scope == scope.key && $0.state != "missing" }) { item in
+                        pathRow(item)
+                    }
+                    if !plan.items.contains(where: { $0.scope == scope.key && $0.state != "missing" }) {
+                        Text("未发现可处理项目").font(.caption).foregroundColor(ClaudeTheme.muted)
+                    }
+                }
+                .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                .background(ClaudeTheme.card).clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+            ForEach(plan.notes, id: \.self) { Text($0).font(.caption).foregroundColor(ClaudeTheme.muted) }
+            Text("其他安装方式与残留").font(.callout.bold())
+            ForEach(plan.manual, id: \.self) { Text($0).font(.caption).textSelection(.enabled) }
+            Text("钥匙串可在 macOS“密码”或“钥匙串访问”中核对 Claude 相关项目后手动移除；不要批量删除其他应用凭据。")
+                .font(.caption).foregroundColor(ClaudeTheme.muted)
+        }
+    }
+
+    private func pathRow(_ item: CleanupItem) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(item.path).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(item.state == "blocked" ? "无法处理：路径不可读取或父目录包含链接" : "约 \(item.sizeLabel)")
+                .font(.caption2).foregroundColor(item.state == "blocked" ? ClaudeTheme.error : ClaudeTheme.muted)
+        }
+    }
+
+    private var reviewView: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("以下项目将移入废纸篓。不会自动退出正在工作的会话；检测到进程仍在运行时会停止。")
+                .font(.callout).fixedSize(horizontal: false, vertical: true)
+            ForEach(vm.cleanupChosen.filter { $0.state == "present" }) { pathRow($0) }
+            Text("账号快照\(vm.cleanupSelection.contains("archives") ? "也会移入废纸篓" : "保留在原处，仍可能包含旧登录资料")。清空废纸篓后无法通过本工具恢复。")
+                .font(.callout).foregroundColor(ClaudeTheme.error).fixedSize(horizontal: false, vertical: true)
+            Text("输入“移入废纸篓”确认").font(.callout.bold())
+            TextField("移入废纸篓", text: $vm.cleanupConfirmation).textFieldStyle(.roundedBorder)
+                .disabled(vm.cleanupBusy).accessibilityIdentifier("cleanup-confirmation")
+        }
+    }
+
+    private func reportView(_ report: CleanupReport) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(Array(report.results.enumerated()), id: \.offset) { _, item in
+                VStack(alignment: .leading, spacing: 3) {
+                    Label(item.detail, systemImage: item.state == "ok" ? "checkmark.circle" : (item.state == "fail" ? "exclamationmark.triangle" : "minus.circle"))
+                        .foregroundColor(item.state == "fail" ? ClaudeTheme.error : ClaudeTheme.ink)
+                    Text(item.path).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                }
+            }
+            Text("恢复位置：\(report.recovery)\n在 Finder 中打开废纸篓，按 restore-map.json 的路径映射恢复；请先退出相关程序。")
+                .font(.caption).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
@@ -1553,6 +1822,10 @@ struct MenuBarContent: View {
             showWindow()
             vm.showSettingsSheet = true
         }
+        Button("清理 Claude / Claude Code") {
+            showWindow()
+            vm.showCleanupSheet = true
+        }.disabled(vm.isBusy)
         Button("导出诊断日志") { vm.exportDiagnostics() }
             .disabled(vm.settingsBusy)
         Divider()

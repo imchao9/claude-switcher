@@ -271,6 +271,34 @@ Windows 加密快照使用 `.csnap`（PBKDF2-HMAC-SHA256 + AES-256-CBC + HMAC-SH
 
 该命令**只检测不修改**：不会卸载、升级或删除任何东西；需要重装时按输出里的建议自行执行对应包管理器命令。
 
+## 清理 Claude 与 Claude Code（macOS）
+
+主窗口与菜单栏的「清理 Claude / Claude Code」提供只读扫描、范围选择、确认清单和逐项结果。所有范围默认不选，确认时需输入「移入废纸篓」。请先完全退出 Claude 桌面端和全部 Claude Code 会话；检测到进程、并发切换、待恢复快照或路径变化时会停止。
+
+| 范围 | 处理内容 |
+| --- | --- |
+| Claude 桌面端数据 | `~/Library/Application Support/Claude`、Claude 缓存、偏好、WebKit、日志等，以及切换器的当前账号指针和旧检查记录；包含本地 MCP 配置 |
+| Claude Code 数据 | `~/.claude`、`~/.claude.json`、`~/.claude.json.backup` 与全部 A–D 的 `~/.claude-switcher/cli-accounts`；包含配置、历史、插件与登录资料 |
+| 桌面端程序 | `/Applications/Claude.app` 与 `~/Applications/Claude.app` |
+| Code 原生程序 | `~/.local/bin/claude` 与 `~/.local/share/claude` |
+| A–D 桌面账号快照 | 整体移动 `~/.claude-switcher/accounts`，保留内部结构；默认保留，旧快照可能仍含登录资料 |
+
+所选项目通过同盘改名移入 `~/.Trash/Claude-cleanup-<时间>-<随机>/`，不会永久删除或提权。首次移动前会写入 `restore-map.json`，其中 `original` 是原路径、`stored` 是目录内的编号。恢复时先退出相关程序，在 Finder 的废纸篓中打开该恢复目录，按映射把编号项目移回原路径、还原原文件名；原路径已有数据时先另存，避免覆盖。清空废纸篓后无法通过本工具恢复。权限不足或跨磁盘移动失败会停止后续项目，已移动项目仍可按映射恢复。
+
+npm/Homebrew 管理的 Claude Code 需使用原包管理器卸载，界面会显示检测到的方式及命令。钥匙串凭据、浏览器登录、外部 `CLAUDE_CONFIG_DIR`、项目内 `.claude`、系统辅助组件不自动处理。钥匙串请在 macOS「钥匙串访问」中核对 Claude 相关项目后手动移除；本功能不承诺清除全部凭据。
+
+**本地清理不能解除服务端风控或封禁**。账号受限请使用官方支持渠道；无需仅因账号受限就删除所有历史和配置。
+
+终端也可调用，预览不依赖网络、不启动应用、不创建账号状态：
+
+```bash
+~/.local/bin/claude-switch.sh cleanup-info
+# 复制预览 JSON 中的 token；范围用逗号分隔，可选 desktop-data,code-data,desktop-app,code-app,archives
+~/.local/bin/claude-switch.sh cleanup-data desktop-data,code-data '<token>' '移入废纸篓'
+```
+
+预览变化后令牌失效，需重新扫描确认。本功能目前仅在 macOS 提供。升级时需同时更新核心脚本和界面 App：核心脚本的自动更新不会替换界面；首次安装可使用新版本 installer-kit，已有安装可分别更新核心与 app-only 界面包。
+
 ## Claude Code 多账号联动（macOS CLI）
 
 终端里的 Claude Code 可以和桌面版使用同一账号：切换器按桌面当前账号映射独立的 `CLAUDE_CONFIG_DIR`（官方支持的多账号登录机制），再用映射后的目录启动真实 CLI。

@@ -90,6 +90,18 @@ Artifacts are written to `build/`.
 The full command set, menu bar behavior, and troubleshooting notes are in the
 [Chinese README](README.md) and [AGENTS.md](AGENTS.md).
 
+## Local cleanup (macOS)
+
+Open **清理 Claude / Claude Code** from the main window or menu bar. The tool scans local paths, lets you select scopes, and shows the exact list before requiring the confirmation phrase `移入废纸篓`. Nothing is selected by default. Quit Claude Desktop and all Claude Code sessions first; active sessions, concurrent operations, pending recovery data, or a changed preview block cleanup.
+
+Scopes cover Desktop data and its current account pointer, all default/A–D Code configuration and history, Desktop apps in `/Applications` and `~/Applications`, native Code installations under `~/.local`, and optionally the entire Desktop account archive directory. Archives are preserved by default and may still contain old login data. Project `.claude` directories are preserved.
+
+Files are renamed into `~/.Trash/Claude-cleanup-<timestamp>-<random>/`. A `restore-map.json` is saved before the first move: `stored` names the numbered item and `original` names its original path. To restore, quit the related programs and move each numbered item back to that path with its original name, preserving any newer data separately first. Emptying Trash removes this recovery option. Permission and cross-volume errors stop later items and retain a partial result; the tool never requests administrator access.
+
+npm/Homebrew installations require their original package manager to uninstall. Keychain credentials, browser sessions, external `CLAUDE_CONFIG_DIR`, and system helper components require manual review. This does not guarantee removal of every credential. **Local cleanup cannot lift a server-side account restriction or ban.**
+
+CLI: `claude-switch.sh cleanup-info` produces a read-only JSON preview without network access or account-state writes. Use its token with `claude-switch.sh cleanup-data desktop-data,code-data '<token>' '移入废纸篓'`; other scopes are `desktop-app`, `code-app`, and `archives`. Refresh the preview after any changes. Upgrade both the core script and the GUI app; the core auto-updater does not replace the GUI.
+
 ## Disclaimer
 
 This project is intended for managing the local environment and sign-in state of

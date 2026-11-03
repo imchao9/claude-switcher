@@ -1,6 +1,8 @@
 import Foundation
 import AppKit
 
+private let cleanupFixturePlan = #"{"version":1,"token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","items":[{"id":"0","scope":"desktop-data","path":"~/Library/Application Support/Claude","state":"present","bytes":4096}],"notes":[],"manual":[]}"#
+
 private let auditKeys = ["代理内核", "TUN网卡", "出口IP", "IP一致", "时区", "地区", "IPv6", "DNS", "WebRTC", "保镖", "规则置顶", "客户端语言", "ASN属性", "生态可达性"]
 
 private struct TestFailure: Error, CustomStringConvertible {
@@ -49,6 +51,8 @@ private final class Fixture {
           set-check-config) printf '%s\n' "$2" > "$root/saved-config"; result set-config ;;
           switch) delay switch; cat "$root/switch-output"; result switch ;;
           fix) delay fix; echo 'FIX:演示修复完成'; result fix ;;
+          cleanup-info) delay cleanup-info; cat "$root/cleanup-plan"; result cleanup-info ;;
+          cleanup-data) delay cleanup-data; cat "$root/cleanup-result"; result cleanup-data ;;
           fingerprint) delay fingerprint; echo 'GPU=ok:演示设备' ;;
           *) exit 2 ;;
         esac
@@ -96,6 +100,66 @@ struct MenuBarModelTests {
             let name = CommandLine.arguments[1]
             let f = try Fixture()
             switch name {
+            case "cleanup_preview_only":
+                try f.write("cleanup-plan", cleanupFixturePlan)
+                let vm = f.vm()
+                vm.loadCleanupPlan(); try f.idle(vm)
+                try expect(vm.cleanupPlan != nil && vm.cleanupSelection.isEmpty, "清理范围默认应为空")
+                try expect(!vm.canReviewCleanup && !vm.canExecuteCleanup, "未选择不能清理")
+                try expect(f.calls == ["cleanup-info"], "预览不得执行清理或网络检查")
+            case "cleanup_confirmation_gate":
+                try f.write("cleanup-plan", cleanupFixturePlan)
+                let vm = f.vm()
+                vm.loadCleanupPlan(); try f.idle(vm)
+                vm.cleanupSelection = ["desktop-data"]
+                try expect(vm.canReviewCleanup, "有效项目应可预览确认清单")
+                vm.executeCleanup(); try f.idle(vm)
+                vm.cleanupReview = true
+                vm.cleanupConfirmation = "delete"
+                vm.executeCleanup(); try f.idle(vm)
+                try expect(f.calls == ["cleanup-info"], "未完成二次确认仍执行了清理")
+            case "cleanup_execution_and_guard":
+                try f.write("cleanup-plan", cleanupFixturePlan)
+                try f.write("cleanup-result", #"{"results":[{"path":"~/Library/Application Support/Claude","state":"ok","detail":"已移入废纸篓"}],"recovery":"~/.Trash/fixture","complete":true}"#)
+                try f.write("cleanup-data-delay", "0.15")
+                let vm = f.vm()
+                vm.loadCleanupPlan(); try f.idle(vm)
+                vm.cleanupSelection = ["desktop-data"]
+                vm.cleanupReview = true; vm.cleanupConfirmation = "移入废纸篓"
+                vm.executeCleanup()
+                try expect(vm.isBusy && !vm.canQuit, "清理时必须阻止退出及其他操作")
+                vm.switchTo("B"); vm.refresh()
+                try f.idle(vm)
+                try expect(vm.cleanupReport?.complete == true, "成功回执未展示")
+                try expect(f.calls.count == 2 && f.calls.last?.hasPrefix("cleanup-data desktop-data ") == true, "执行范围不正确或发生并发操作")
+                try expect(vm.cleanupPlan == nil && vm.cleanupConfirmation.isEmpty, "执行后必须丢弃令牌和确认文字")
+                try expect(vm.phase == .failed && vm.lastCheckSummary.contains("重新检查"), "清理后旧检查结果失效")
+            case "cleanup_failure_preserved":
+                try f.write("cleanup-plan", cleanupFixturePlan)
+                try f.write("cleanup-result", #"{"results":[{"path":"/Applications/Claude.app","state":"fail","detail":"权限不足"}],"recovery":"~/.Trash/fixture","complete":false}"#)
+                try f.write("cleanup-data-exit", "1")
+                let vm = f.vm()
+                vm.loadCleanupPlan(); try f.idle(vm)
+                vm.cleanupSelection = ["desktop-data"]; vm.cleanupReview = true; vm.cleanupConfirmation = "移入废纸篓"
+                vm.executeCleanup(); try f.idle(vm)
+                try expect(vm.cleanupReport?.results.first?.state == "fail", "非零退出不能丢失逐项失败结果")
+                try expect(vm.cleanupMessage.contains("未完成"), "部分失败不能当成成功")
+            case "cleanup_preflight_error":
+                try f.write("cleanup-plan", cleanupFixturePlan)
+                try f.write("cleanup-result", #"{"error":"请完全退出 Claude"}"#)
+                try f.write("cleanup-data-exit", "1")
+                let vm = f.vm()
+                vm.loadCleanupPlan(); try f.idle(vm)
+                vm.cleanupSelection = ["desktop-data"]; vm.cleanupReview = true; vm.cleanupConfirmation = "移入废纸篓"
+                vm.executeCleanup(); try f.idle(vm)
+                try expect(vm.cleanupMessage == "请完全退出 Claude", "前置失败原因应保留")
+                try expect(vm.cleanupReport == nil && vm.cleanupPlan == nil, "失败后必须重新预览")
+            case "cleanup_bad_plan":
+                try f.write("cleanup-plan", "{}")
+                let vm = f.vm()
+                vm.loadCleanupPlan(); try f.idle(vm)
+                try expect(vm.cleanupPlan == nil && !vm.canReviewCleanup, "无效预览不可放行")
+                try expect(vm.cleanupMessage.contains("更新"), "旧核心应提示一起更新")
             case "startup_once":
                 let vm = f.vm()
                 vm.start(); vm.start()
