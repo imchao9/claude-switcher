@@ -53,7 +53,16 @@ try {
     $tampered = Join-Path $root 'tampered.csnap'
     Copy-Item -LiteralPath $image -Destination $tampered
     $stream = [IO.File]::Open($tampered,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
-    try { $stream.Position = $stream.Length - 1; $stream.WriteByte(0) } finally { $stream.Dispose() }
+    try {
+        # 写固定的 0 可能没有改变密文；翻转一位确保每次都产生真实篡改。
+        $stream.Position = $stream.Length - 1
+        $originalByte = $stream.ReadByte()
+        $stream.Position = $stream.Length - 1
+        $stream.WriteByte([byte]($originalByte -bxor 1))
+        $stream.Flush()
+        $stream.Position = $stream.Length - 1
+        Assert '篡改确实改变密文字节' ($stream.ReadByte() -ne $originalByte)
+    } finally { $stream.Dispose() }
     $home5 = Join-Path $root 'home5'
     $r = Invoke-Snapshot @('snapshot-import',$tampered,'A','--password-stdin') $password $home5
     Assert '篡改认证失败且不建槽位' ($r.code -ne 0 -and -not (Test-Path "$home5\.claude-switcher\accounts\A")) $r.output
