@@ -16,6 +16,19 @@ struct CheckRow: Identifiable {
 
 enum Phase { case checking, ready, failed, switching, done, fixing }
 
+// 入口只改变展示，不推断服务端账号状态，也不触发任何核心命令。
+enum UsageJourney: String, CaseIterable, Identifiable {
+    case firstUse, daily, recovery
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .firstUse: return "首次使用"
+        case .daily: return "日常使用"
+        case .recovery: return "受限与清理"
+        }
+    }
+}
+
 struct CoreResult {
     let output: String
     let succeeded: Bool
@@ -150,6 +163,22 @@ final class VM: ObservableObject {
     @Published var showSettingsSheet = false
     @Published private(set) var languagePreferences = LanguagePreferences(system: nil, claude: nil)
     @Published private(set) var languageSettingsMessage = ""
+
+    @Published private(set) var selectedJourney: UsageJourney?
+    var journey: UsageJourney {
+        selectedJourney ?? (coreMissing || !Self.accountLetters.contains(current) ? .firstUse : .daily)
+    }
+    var environmentReady: Bool { phase == .ready || phase == .done }
+    var failedChecks: [CheckRow] { rows.filter { $0.state == .fail } }
+    func selectJourney(_ value: UsageJourney) {
+        hideAfterSwitch?.cancel()
+        selectedJourney = value
+    }
+    func openCleanup() {
+        guard !isBusy, coreAvailable() else { return }
+        selectJourney(.recovery)
+        showCleanupSheet = true
+    }
 
     @Published var showCleanupSheet = false
     @Published private(set) var cleanupPlan: CleanupPlan?
@@ -812,30 +841,39 @@ struct ContentView: View {
     @State private var showNotice = false
     @State private var showFingerprint = false
     @State private var showAIPrompt = false
+    @State private var showCheckDetails = false
 
     var body: some View {
         ZStack {
             ClaudeBackground()
             VStack(spacing: 12) {
                 header
-                HStack {
-                    Text("环境检查").font(.caption.weight(.semibold)).foregroundColor(ClaudeTheme.muted)
-                    Spacer()
-                    statusPill
+                Picker("使用场景", selection: Binding(get: { vm.journey }, set: { vm.selectJourney($0) })) {
+                    ForEach(UsageJourney.allCases) { Text($0.title).tag($0) }
                 }
-                // 小屏上窗口高度会被系统可见区域压缩,让卡片区可滚动而不是被裁切
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("usage-journey")
+                // 主任务优先，小屏继续滚动查看完整检查与工具。
                 ScrollView {
-                    VStack(spacing: 16) {
-                        checksCard
-                        clientCard
-                        cleanupEntry
-                        if vm.phase == .ready || vm.phase == .switching || vm.phase == .done {
-                            accountCard
-                        } else if vm.coreMissing {
-                            setupCard
-                        } else if vm.phase == .failed || vm.phase == .fixing {
-                            retryCard
+                    VStack(spacing: 14) {
+                        journeyCard
+                        if vm.journey != .recovery {
+                            if vm.coreMissing { setupCard }
+                            else if vm.phase == .ready || vm.phase == .switching || vm.phase == .done { accountCard }
+                            else if vm.phase == .failed || vm.phase == .fixing { retryCard }
                         }
+                        DisclosureGroup(isExpanded: $showCheckDetails) {
+                            checksCard.padding(.top, 8)
+                        } label: {
+                            HStack {
+                                Text("环境检查 · \(vm.rows.count) 项").font(.callout.weight(.semibold))
+                                Spacer()
+                                statusPill
+                            }
+                        }
+                        .tint(ClaudeTheme.terracottaDeep)
+                        clientCard
+                        if vm.journey != .recovery { cleanupEntry }
                     }
                     .frame(maxWidth: .infinity)
                 }
@@ -878,7 +916,7 @@ struct ContentView: View {
                 Text("Claude 账号切换器")
                     .font(.system(size: 16, weight: .bold, design: .serif))
                     .foregroundColor(ClaudeTheme.ink)
-                Text("安全检查 · 切换 · 启动")
+                Text("设置 · 日常启动 · 受限与清理")
                     .font(.system(size: 11, weight: .regular))
                     .foregroundColor(ClaudeTheme.muted)
             }
@@ -913,8 +951,88 @@ struct ContentView: View {
         .sheet(isPresented: $showFingerprint) { FingerprintView(text: vm.fingerprint) }
     }
 
+    var journeyCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            switch vm.journey {
+            case .firstUse:
+                Label("先准备环境，再登录账号", systemImage: "sparkles")
+                    .font(.headline).foregroundColor(ClaudeTheme.ink)
+                Text("已有 Claude 登录资料会继续保留。首次使用无需清理数据。")
+                    .font(.caption).foregroundColor(ClaudeTheme.muted)
+                guideStep("1", title: "安装切换器与 Claude", detail: vm.coreMissing
+                          ? "下载完整 installer-kit，按安装说明完成设置。"
+                          : "已找到核心脚本；请确认 Claude 桌面端已安装。")
+                guideStep("2", title: "完成环境检查", detail: vm.environmentReady
+                          ? "检查已完成；跳过项与警告可展开核对。"
+                          : "打开代理并确认节点地区；未通过项处理后重新检查。")
+                guideStep("3", title: "选择账号槽位并登录", detail: "A–D 是本机槽位。选当前槽位可启动，选其他槽位会切换；首次登录在 Claude 中完成。")
+                if vm.environmentReady {
+                    Button("已了解，进入日常使用") { vm.selectJourney(.daily) }
+                        .buttonStyle(.borderedProminent).tint(ClaudeTheme.terracottaDeep)
+                }
+            case .daily:
+                Label("继续使用 Claude", systemImage: "play.circle")
+                    .font(.headline).foregroundColor(ClaudeTheme.ink)
+                Text(VM.accountLetters.contains(vm.current) ? "当前槽位 \(vm.current) · 点击当前槽位启动，点击其他槽位切换。" : "当前槽位待确认，请完成环境检查。")
+                    .font(.callout).fixedSize(horizontal: false, vertical: true)
+                Text(vm.environmentReady ? "启动或切换前仍会重新检查。检查通过只代表本地环境，不代表账号可用。" : "环境尚未就绪，处理下面的提示后继续。")
+                    .font(.caption).foregroundColor(ClaudeTheme.muted)
+                if !vm.failedChecks.isEmpty && !vm.coreMissing {
+                    Text("待处理：" + vm.failedChecks.map { $0.name }.joined(separator: "、"))
+                        .font(.caption).foregroundColor(ClaudeTheme.error)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text("Claude Code：在终端运行 ~/.local/bin/claude-switch.sh cli，首次在对应槽位中单独登录。")
+                    .font(.caption).foregroundColor(ClaudeTheme.muted).textSelection(.enabled)
+            case .recovery:
+                Label("账号受限或需要清理", systemImage: "lifepreserver")
+                    .font(.headline).foregroundColor(ClaudeTheme.ink)
+                Text("本工具无法判断或解除账号封禁。先区分环境故障、登录过期和官方限制提示，再决定下一步。")
+                    .font(.callout).fixedSize(horizontal: false, vertical: true)
+                guideStep("1", title: "只有网络或检查异常", detail: "展开环境检查；修复网络后重新检查，无需先卸载或清理。")
+                Button("重新检查环境") { vm.refresh() }.disabled(vm.isBusy)
+                guideStep("2", title: "Claude 明确提示账号受限", detail: "保留官方错误提示，联系官方支持。可导出脱敏环境诊断用于排查。")
+                HStack {
+                    Button("导出诊断…") { vm.exportDiagnostics() }.disabled(vm.settingsBusy || vm.isBusy || vm.coreMissing)
+                    Button("官方支持") { openURL("https://support.claude.com") }
+                }
+                if !vm.settingsMessage.isEmpty {
+                    Text(vm.settingsMessage).font(.caption).textSelection(.enabled)
+                }
+                guideStep("3", title: "确认要重置数据或卸载", detail: "先退出 Claude 与全部 Code 会话；下一页选择范围并查看实际路径。默认保留账号快照。")
+                Button { vm.openCleanup() } label: {
+                    Label("查看清理范围…", systemImage: "trash")
+                }
+                .buttonStyle(.bordered).disabled(vm.isBusy || vm.coreMissing)
+                if vm.coreMissing {
+                    Text("清理与诊断需要先安装核心脚本；可切到首次使用查看安装入口。")
+                        .font(.caption).foregroundColor(ClaudeTheme.muted)
+                }
+                Text("本地清理不会解除服务端风控；移动的文件在废纸篓中保留恢复映射。")
+                    .font(.caption).foregroundColor(ClaudeTheme.muted)
+            }
+        }
+        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+        .background(ClaudeTheme.card)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(ClaudeTheme.cardBorder))
+        .accessibilityIdentifier("journey-" + vm.journey.rawValue)
+    }
+
+    private func guideStep(_ number: String, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(number).font(.caption.bold()).foregroundColor(ClaudeTheme.terracottaDeep)
+                .frame(width: 22, height: 22).background(ClaudeTheme.terracottaTint).clipShape(Circle())
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.callout.weight(.semibold))
+                Text(detail).font(.caption).foregroundColor(ClaudeTheme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
     var cleanupEntry: some View {
-        Button { vm.showCleanupSheet = true } label: {
+        Button { vm.openCleanup() } label: {
             HStack(spacing: 10) {
                 Image(systemName: "trash").foregroundColor(ClaudeTheme.terracottaDeep)
                 VStack(alignment: .leading, spacing: 3) {
@@ -933,13 +1051,17 @@ struct ContentView: View {
         .buttonStyle(.plain)
         .disabled(vm.isBusy)
         .accessibilityIdentifier("cleanup-entry")
+        .disabled(vm.coreMissing)
     }
 
     var statusPill: some View {
         let (txt, color): (String, Color) = {
             switch vm.phase {
             case .checking: return ("检查中", ClaudeTheme.terracottaDeep)
-            case .ready: return ("环境安全", ClaudeTheme.success)
+            case .ready:
+                if vm.rows.contains(where: { $0.state == .warn }) { return ("有警告", ClaudeTheme.warning) }
+                if vm.rows.contains(where: { $0.state == .skip }) { return ("通过 · 含跳过", ClaudeTheme.muted) }
+                return ("检查通过", ClaudeTheme.success)
             case .failed: return ("检查未过", ClaudeTheme.error)
             case .switching: return ("切换中", ClaudeTheme.terracottaDeep)
             case .fixing: return ("修复中", ClaudeTheme.terracottaDeep)
@@ -1033,13 +1155,17 @@ struct ContentView: View {
                 get: { vm.currentClient },
                 set: { vm.setClient($0) }
             )) {
+                if !VM.clientChoices.contains(where: { $0.key == vm.currentClient }) {
+                    Text(vm.currentClient.isEmpty ? (vm.coreMissing ? "安装后选择" : "尚未识别") : vm.currentClient)
+                        .tag(vm.currentClient)
+                }
                 ForEach(VM.clientChoices, id: \.key) { choice in
                     Text(choice.label).tag(choice.key)
                 }
             }
             .labelsHidden()
             .frame(width: 150)
-            .disabled(vm.isBusy || vm.isSwitchingClient)
+            .disabled(vm.isBusy || vm.isSwitchingClient || vm.coreMissing)
         }
         .padding(.vertical, 7)
         .padding(.horizontal, 12)
@@ -1100,7 +1226,7 @@ struct ContentView: View {
 
     func accountSubtitle(_ t: String) -> String {
         if vm.current == t { return "当前" }
-        guard vm.archived.contains(t) else { return "未初始化" }
+        guard vm.archived.contains(t) else { return "首次登录" }
         guard let stamp = vm.stamps[t] else { return "已建档" }
         return "已建档 · \(stamp.size) · \(shortDate(stamp.date))"
     }
@@ -1114,7 +1240,7 @@ struct ContentView: View {
     func accountButton(_ t: String, subtitle: String) -> some View {
         Button { vm.switchTo(t) } label: {
             VStack(spacing: 4) {
-                Text("账号 \(t)").font(.headline).foregroundColor(vm.current == t ? .white : ClaudeTheme.ink)
+                Text(vm.current == t ? "启动 \(t)" : "切换到 \(t)").font(.headline).foregroundColor(vm.current == t ? .white : ClaudeTheme.ink)
                 Text(subtitle).font(.caption2).foregroundColor(vm.current == t ? .white.opacity(0.9) : ClaudeTheme.muted)
             }
             .frame(maxWidth: .infinity).padding(.vertical, 14)
@@ -1135,7 +1261,7 @@ struct ContentView: View {
             Text("还差一步：安装核心脚本").font(.callout.bold()).foregroundColor(ClaudeTheme.ink)
             Text(vm.banner).font(.caption).foregroundColor(ClaudeTheme.muted).multilineTextAlignment(.center)
             HStack(spacing: 10) {
-                Button { openURL("https://github.com/YOURSJEYO/claude-switcher/releases/latest") } label: {
+                Button { openURL("https://github.com/imchao9/claude-switcher/releases/latest") } label: {
                     Label("打开下载页", systemImage: "arrow.down.circle")
                         .font(.callout.bold())
                         .padding(.horizontal, 18).padding(.vertical, 8)
@@ -1144,7 +1270,7 @@ struct ContentView: View {
                         .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
-                Button { openURL("https://github.com/YOURSJEYO/claude-switcher#安装") } label: {
+                Button { openURL("https://github.com/imchao9/claude-switcher#安装") } label: {
                     Label("安装说明", systemImage: "book")
                         .font(.callout.bold())
                         .padding(.horizontal, 18).padding(.vertical, 8)
@@ -1824,7 +1950,7 @@ struct MenuBarContent: View {
         }
         Button("清理 Claude / Claude Code") {
             showWindow()
-            vm.showCleanupSheet = true
+            vm.openCleanup()
         }.disabled(vm.isBusy)
         Button("导出诊断日志") { vm.exportDiagnostics() }
             .disabled(vm.settingsBusy)

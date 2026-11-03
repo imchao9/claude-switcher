@@ -129,3 +129,9 @@ responsible for how you use it.
 ## License
 
 MIT © ClaudeSwitcher Contributors
+
+## macOS usage paths
+
+The main window offers First use, Daily use, and Restrictions & cleanup. Unknown slots or a missing core initially show setup guidance; a known slot defaults to daily use. Explicit navigation is retained for the current run and does not execute core operations. Daily use prioritizes launch/switch actions and makes all 14 checks expandable. Launch and switch still perform a fresh audit.
+
+For connection failures, inspect the environment first. For an explicit account restriction, contact official support and optionally export sanitized diagnostics. Cleanup remains a separate preview, scope selection, and typed confirmation. Local cleanup cannot remove server-side restrictions. Slots A–D are local profiles, not account health ratings.

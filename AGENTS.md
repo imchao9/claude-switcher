@@ -45,6 +45,10 @@
 
 跨身份保留（可选，默认关闭）：`~/.claude-switcher/keep-in-workspace.txt` 每行一个相对 Claude 数据目录的路径（如 `settings.json`、`skills/`），`#` 注释、空行忽略。切换时先收进 `~/.claude-switcher/keep-stage/`，还原目标账号后合并回去；绝对路径、含 `..` 和符号链接会跳过并记 WARN。文件不存在或为空时行为与未启用完全一致。只放通用配置，不要放登录态/缓存等账号专属文件。
 
+## 场景交互（macOS）
+
+主窗口的「首次使用 / 日常使用 / 受限与清理」仅组织展示。不要把场景选择当作授权启动、清理或判定封禁。首次流程保留旧数据，日常流程优先启动/切换并可展开 14 项，受限流程提供检查/脱敏诊断/官方支持/显式清理。入口切换不放宽已有检查，未知槽位或缺少核心默认首次引导。`tests/MenuBarFixture.swift --first-use` / `--recovery` 可用假核心渲染路径。
+
 ## 本地数据清理（macOS）
 
 App 主窗口和菜单栏提供「清理 Claude / Claude Code」。`cleanup-info` 只读输出预览 JSON；`cleanup-data <逗号分隔范围> <token> <移入废纸篓>` 执行用户确认的范围。范围为 `desktop-data`、`code-data`、`desktop-app`、`code-app`、`archives`，默认全部不选；账号快照仅在显式选择 `archives` 时整体移入废纸篓，内部结构不变。

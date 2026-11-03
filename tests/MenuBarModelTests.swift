@@ -100,6 +100,46 @@ struct MenuBarModelTests {
             let name = CommandLine.arguments[1]
             let f = try Fixture()
             switch name {
+            case "journey_default_and_navigation":
+                let vm = f.vm()
+                try expect(vm.journey == .firstUse, "未知槽位应显示首次引导")
+                vm.current = "A"
+                try expect(vm.journey == .daily, "已知槽位应显示日常入口")
+                vm.selectJourney(.recovery)
+                vm.current = "B"
+                try expect(vm.journey == .recovery, "状态刷新不能覆盖用户选择")
+                vm.selectJourney(.firstUse)
+                try expect(vm.journey == .firstUse && f.calls.isEmpty, "导航不应执行核心操作")
+            case "journey_cleanup_route":
+                let vm = f.vm()
+                vm.openCleanup()
+                try expect(vm.journey == .recovery && vm.showCleanupSheet, "工具入口应进入恢复路径")
+                try expect(vm.cleanupSelection.isEmpty && !vm.canExecuteCleanup && f.calls.isEmpty, "打开入口不能选择或执行清理")
+            case "journey_busy_cleanup_guard":
+                let vm = f.vm()
+                try f.write("check-delay", "0.2")
+                vm.refresh()
+                vm.openCleanup()
+                try expect(!vm.showCleanupSheet, "忙碌时不能启动清理")
+                vm.selectJourney(.recovery)
+                try expect(vm.isBusy, "场景导航不能清除核心忙碌状态")
+                try f.idle(vm)
+                try expect(vm.journey == .recovery && vm.phase == .ready, "导航应保留检查的真实结果")
+            case "journey_navigation_keeps_launch_gate":
+                let vm = f.vm()
+                try f.audit(["出口IP": "fail:国家不一致"])
+                vm.selectJourney(.daily)
+                try f.deniedSwitch(vm)
+                try expect(vm.journey == .daily && !vm.environmentReady, "选择日常入口不能放宽硬性检查")
+            case "journey_missing_core":
+                let vm = VM(core: f.root.appendingPathComponent("missing.sh").path)
+                vm.current = "A"
+                vm.refresh()
+                try expect(vm.journey == .firstUse && vm.coreMissing && !vm.environmentReady, "缺少核心应指引安装")
+                vm.selectJourney(.recovery)
+                vm.openCleanup()
+                try expect(!vm.showCleanupSheet, "缺少核心不能打开空白清理页")
+                try expect(vm.journey == .recovery && !vm.environmentReady, "受限入口不能放宽安装门禁")
             case "cleanup_preview_only":
                 try f.write("cleanup-plan", cleanupFixturePlan)
                 let vm = f.vm()
@@ -176,7 +216,7 @@ struct MenuBarModelTests {
                 let card = ContentView(vm: vm)
                 try expect(card.accountSubtitle("A") == "当前", "当前账号副标题不正确")
                 try expect(card.accountSubtitle("B") == "已建档 · 900M · 10-19", "已建档副标题应带大小与日期")
-                try expect(card.accountSubtitle("D") == "未初始化", "空槽位副标题不正确")
+                try expect(card.accountSubtitle("D") == "首次登录", "空槽位副标题不正确")
                 vm.switchTo("C"); try f.idle(vm)
                 try expect(vm.current == "C" && vm.note.isEmpty, "已建档的 C 不应提示首次登录")
                 try expect(f.calls.contains("switch C"), "C 应被允许切换")

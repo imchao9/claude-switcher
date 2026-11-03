@@ -8,6 +8,7 @@ import unittest
 
 PROJECT = Path(__file__).resolve().parents[1]
 SCENARIOS = (
+    "journey_default_and_navigation", "journey_cleanup_route", "journey_busy_cleanup_guard", "journey_missing_core", "journey_navigation_keeps_launch_gate",
     "cleanup_preview_only", "cleanup_confirmation_gate", "cleanup_execution_and_guard",
     "cleanup_failure_preserved", "cleanup_preflight_error", "cleanup_bad_plan",
     "language_system_readback", "language_order_and_override", "language_inherited_and_unavailable", "language_refresh_and_open",

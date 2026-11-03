@@ -8,7 +8,7 @@ final class FixtureDelegate: AppDelegate {
               FileManager.default.fileExists(atPath: CommandLine.arguments[1]) else {
             fatalError("隔离演示需要显式传入 fake-core.sh 路径")
         }
-        super.init(vm: VM(core: CommandLine.arguments[1], languagePreferencesReader: {
+        super.init(vm: VM(core: CommandLine.arguments.contains("--missing-core") ? CommandLine.arguments[1] + ".missing" : CommandLine.arguments[1], languagePreferencesReader: {
             if CommandLine.arguments.contains("--language-unavailable") {
                 return LanguagePreferences(system: nil, claude: nil)
             }
@@ -19,6 +19,8 @@ final class FixtureDelegate: AppDelegate {
     override func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.appearance = NSAppearance(named: CommandLine.arguments.contains("--dark") ? .darkAqua : .aqua)
         super.applicationDidFinishLaunching(notification)
+        if CommandLine.arguments.contains("--first-use") { vm.selectJourney(.firstUse) }
+        if CommandLine.arguments.contains("--recovery") { vm.selectJourney(.recovery) }
         mainWindow?.title = "Claude 切换器 · 隔离演示"
         print("DEMO activation policy: \(NSApplication.shared.activationPolicy().rawValue)")
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
@@ -58,15 +60,24 @@ final class FixtureDelegate: AppDelegate {
         if let index = CommandLine.arguments.firstIndex(of: "--capture"), index + 1 < CommandLine.arguments.count {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
                 let window = self.mainWindow?.attachedSheet ?? self.mainWindow
-                if let view = window?.contentView,
-                   let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
-                    view.cacheDisplay(in: view.bounds, to: bitmap)
-                    if let data = bitmap.representation(using: .png, properties: [:]) {
-                        try? data.write(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
-                        print("DEMO captured rendered window")
-                    }
+                guard !self.vm.isBusy, self.vm.canQuit,
+                      let view = window?.contentView,
+                      let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+                    fputs("DEMO capture unavailable or operation still running\n", stderr)
+                    exit(1)
                 }
-                NSApplication.shared.terminate(nil)
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                do {
+                    guard let data = bitmap.representation(using: .png, properties: [:]) else { exit(1) }
+                    try data.write(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+                    print("DEMO captured rendered window")
+                    fflush(stdout)
+                    // Fixture only: terminate deterministically even with a SwiftUI sheet open.
+                    exit(0)
+                } catch {
+                    fputs("DEMO failed to save capture\n", stderr)
+                    exit(1)
+                }
             }
         }
         if let window = mainWindow {
