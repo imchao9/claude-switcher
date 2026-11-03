@@ -6,7 +6,7 @@
 python3 -m unittest discover -s tests -v
 ```
 
-31 个菜单栏场景覆盖多账号状态解析、A–D 切换与首次使用提示、旧版状态回退、本地账号刷新、切换前重新审计、警告放行、失败/缺行/重复行/空值/超时/非零退出阻断、忙碌互斥、退出保护、隐藏回调与单窗口生命周期。非 macOS 系统跳过这部分，继续运行现有的核心脚本测试。
+菜单栏场景覆盖多账号状态解析、A–D 切换与首次使用提示、旧版状态回退、本地账号刷新、切换前重新审计、警告放行、失败/缺行/重复行/空值/超时/非零退出阻断、忙碌互斥、退出保护、隐藏回调与单窗口生命周期。语言场景另覆盖系统语言顺序、Claude 单独语言覆盖、读取失败、刷新、设置入口失败、检查跳过不探测，以及原失败状态保留；原生读取也会只读对照系统 `defaults` 输出。非 macOS 系统跳过这部分，继续运行现有的核心脚本测试。
 
 ## UI 演示程序
 
@@ -32,6 +32,8 @@ case "$1" in
     for key in 代理内核 TUN网卡 出口IP IP一致 时区 地区 IPv6 DNS WebRTC 保镖 规则置顶 客户端语言 ASN属性 生态可达性; do
       if [ "$key" = ASN属性 ]; then echo "$key=warn:演示机房"; else echo "$key=ok:演示数据"; fi
     done ;;
+  get-client) echo 'client=clash-verge' ;;
+  get-check-config) echo '{"disabled":[],"allowOptionalFailures":false,"logging":true}' ;;
   status) echo 'current=A hasA=1 hasB=1 hasC=1 hasD=0 accounts=A,B,C accA=1.2G@2026-10-20 accB=900M@2026-10-19 accC=2.0G@2026-10-18' ;;
   switch) echo "OK:演示切换至 $2" ;;
   fix) echo 'FIX:演示修复' ;;
@@ -55,6 +57,8 @@ _trash/menu-bar-demo/MenuBarFixture "$PWD/_trash/menu-bar-demo/fake-core.sh"
 6. 菜单项支持方向键、Return、⌘O、⌘Q；图标有辅助功能标签，检查结果用文字表示而不是只用颜色。
 7. 在浅色、深色下检查菜单图标和文字；可在 VoiceOver 中确认图标、菜单项和禁用状态可读取。
 8. 选择「退出 Claude 切换器」后图标消失；确认本机已安装的应用和系统服务没有被修改。
+
+语言设置专项验收：启动命令末尾加 `--language-settings`，打开同一份生产设置页，检查 `en-US`、`zh-Hans-CN` 的顺序与首选标记、Claude 跟随系统、按钮和滚动区域。演示中的系统设置按钮固定返回失败，点击后应展示手动路径，不打开或修改真实系统设置。加 `--language-unavailable` 可验证语言缺失状态。关闭设置页后，主窗口「客户端语言」详情应完整换行展示系统首选与 Claude 来源；禁用项仍显示跳过。
 
 截图只使用这个演示程序。不要运行真实账号切换或把住宅/代理 IP、凭据放进截图。
 

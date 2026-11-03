@@ -8,6 +8,8 @@ import unittest
 
 PROJECT = Path(__file__).resolve().parents[1]
 SCENARIOS = (
+    "language_system_readback", "language_order_and_override", "language_inherited_and_unavailable", "language_refresh_and_open",
+    "language_audit_detail", "language_skip_no_read", "language_failure_preserved",
     "startup_once", "multi_account_status", "first_use_cd_note", "legacy_status_fallback",
     "invalid_multi_account_status", "warnings_allowed", "skipped_optional_allowed", "settings_round_trip", "local_status_refresh", "fresh_audit", "failed_check",
     "incomplete_check", "duplicate_check", "duplicate_overwrite", "empty_check",

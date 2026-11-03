@@ -8,7 +8,12 @@ final class FixtureDelegate: AppDelegate {
               FileManager.default.fileExists(atPath: CommandLine.arguments[1]) else {
             fatalError("隔离演示需要显式传入 fake-core.sh 路径")
         }
-        super.init(vm: VM(core: CommandLine.arguments[1]))
+        super.init(vm: VM(core: CommandLine.arguments[1], languagePreferencesReader: {
+            if CommandLine.arguments.contains("--language-unavailable") {
+                return LanguagePreferences(system: nil, claude: nil)
+            }
+            return LanguagePreferences(system: ["en-US", "zh-Hans-CN"], claude: nil)
+        }, languageSettingsOpener: { false }))
     }
 
     override func applicationDidFinishLaunching(_ notification: Notification) {
@@ -29,6 +34,11 @@ final class FixtureDelegate: AppDelegate {
                 print("DEMO image description: \(button.image?.accessibilityDescription ?? "")")
             }
             fflush(stdout)
+        }
+        if CommandLine.arguments.contains("--language-settings") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.vm.showSettingsSheet = true
+            }
         }
         if let window = mainWindow {
             print("DEMO window frame: \(window.frame), visible screen: \(window.screen?.visibleFrame ?? .zero)")

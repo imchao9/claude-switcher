@@ -67,7 +67,9 @@ private final class Fixture {
     }
 
     func vm(checkTimeout: TimeInterval = 2, operationTimeout: TimeInterval = 2) -> VM {
-        VM(core: core.path, checkTimeout: checkTimeout, operationTimeout: operationTimeout)
+        VM(core: core.path, checkTimeout: checkTimeout, operationTimeout: operationTimeout,
+           languagePreferencesReader: { LanguagePreferences(system: ["en-US", "zh-Hans-CN"], claude: nil) },
+           languageSettingsOpener: { false })
     }
 
     var calls: [String] {
@@ -146,6 +148,77 @@ struct MenuBarModelTests {
                 try f.idle(vm)
                 try expect(vm.phase == .done && vm.current == "B", "显式跳过的非关键项不应阻断切换")
                 try expect(vm.rows.first { $0.name == "DNS 走隧道" }?.state == .skip, "跳过项必须显示 skip")
+            case "language_system_readback":
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+                process.arguments = ["read", "-g", "AppleLanguages"]
+                let output = Pipe()
+                process.standardOutput = output
+                process.standardError = Pipe()
+                try process.run()
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                let expected = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String]
+                let actual = LanguagePreferences.read()
+                if process.terminationStatus == 0 {
+                    try expect(expected != nil && actual.system == expected, "原生读取必须与系统 defaults 的语言顺序一致")
+                } else {
+                    try expect(actual.system == nil, "系统未配置语言时不得猜测英文")
+                }
+            case "language_order_and_override":
+                let preferences = LanguagePreferences(system: ["en-US", "zh-Hans-CN"], claude: ["ja-JP", "en-US"])
+                try expect(preferences.system == ["en-US", "zh-Hans-CN"], "系统语言应保持原顺序")
+                try expect(preferences.systemSummary == "en-US", "第一项才是系统首选")
+                try expect(preferences.claudeSummary == "单独设置：ja-JP", "Claude 应展示单独设置的第一项")
+                try expect(LanguagePreferences.displayName("zh-Hans-CN").contains("中文"), "语言应有可读名称")
+            case "language_inherited_and_unavailable":
+                let inherited = LanguagePreferences(system: ["fr-FR", "en-US"], claude: nil)
+                try expect(inherited.claudeSummary == "跟随系统：fr-FR", "跟随系统应使用首选项，不能查找后续英文")
+                let unavailable = LanguagePreferences(system: nil, claude: nil)
+                try expect(unavailable.systemSummary == "无法读取", "未知系统语言不能显示为英文或通过")
+                try expect(unavailable.claudeSummary.contains("无法读取"), "无法读取系统语言时应保留未知")
+            case "language_refresh_and_open":
+                var current = LanguagePreferences(system: ["zh-Hans-CN", "en-US"], claude: nil)
+                var opens = 0
+                var canOpen = true
+                let vm = VM(core: f.core.path, languagePreferencesReader: { current },
+                            languageSettingsOpener: { opens += 1; return canOpen })
+                vm.loadLanguagePreferences()
+                try expect(vm.languagePreferences.systemSummary == "zh-Hans-CN", "应读取当前首选语言")
+                current = LanguagePreferences(system: ["en-US", "zh-Hans-CN"], claude: ["en-GB"])
+                vm.loadLanguagePreferences()
+                try expect(vm.languagePreferences.systemSummary == "en-US", "刷新应反映系统顺序变化")
+                try expect(vm.languagePreferences.claudeSummary == "单独设置：en-GB", "刷新应更新 Claude 配置")
+                vm.openLanguageSettings()
+                try expect(opens == 1 && vm.languageSettingsMessage.contains("重新打开"), "打开后应提示重启 Claude")
+                canOpen = false
+                vm.openLanguageSettings()
+                try expect(opens == 2 && vm.languageSettingsMessage.contains("无法打开"), "打开失败必须给出手动路径")
+                try expect(f.calls.isEmpty, "查看语言或打开设置不得调用核心脚本、修复或启动")
+            case "language_audit_detail":
+                let vm = f.vm()
+                vm.start(); try f.idle(vm)
+                let row = vm.rows.first { $0.name == "客户端语言" }
+                try expect(row?.state == .ok && vm.rows.count == 14, "语言展示不得改变原有状态或检查总数")
+                try expect(row?.detail.contains("系统首选：en-US") == true, "检查详情应展示系统首选语言")
+                try expect(row?.detail.contains("Claude 跟随系统：en-US") == true, "检查详情应显示配置来源")
+            case "language_skip_no_read":
+                try f.audit(["客户端语言": "skip:用户已禁用"])
+                var reads = 0
+                let vm = VM(core: f.core.path, languagePreferencesReader: {
+                    reads += 1
+                    return LanguagePreferences(system: ["en-US"], claude: nil)
+                })
+                vm.start(); try f.idle(vm)
+                let row = vm.rows.first { $0.name == "客户端语言" }
+                try expect(reads == 0 && row?.state == .skip && row?.detail == "用户已禁用", "跳过检查时不可额外探测或改成通过")
+            case "language_failure_preserved":
+                try f.audit(["客户端语言": "fail:跟随系统(中文)"])
+                let vm = f.vm()
+                vm.start(); try f.idle(vm)
+                let row = vm.rows.first { $0.name == "客户端语言" }
+                try expect(row?.state == .fail && vm.phase == .failed, "附加语言信息不能覆盖原检查失败")
+                try expect(row?.detail.hasPrefix("跟随系统(中文)；") == true, "原检查原因应保留")
             case "settings_round_trip":
                 try f.write("check-config", #"{"disabled":["DNS"],"allowOptionalFailures":true,"logging":false}"#)
                 let vm = f.vm()

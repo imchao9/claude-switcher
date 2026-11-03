@@ -26,6 +26,39 @@ struct AccountStamp: Equatable {
     let date: String
 }
 
+// 保留系统原始顺序；Claude 的单独语言设置与系统首选语言分别展示。
+struct LanguagePreferences {
+    let system: [String]?
+    let claude: [String]?
+
+    static func read() -> LanguagePreferences {
+        func languages(_ domain: CFString) -> [String]? {
+            CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+            guard let values = CFPreferencesCopyValue("AppleLanguages" as CFString, domain,
+                                                     kCFPreferencesCurrentUser, kCFPreferencesAnyHost) as? [String],
+                  !values.isEmpty, values.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+                return nil
+            }
+            return values
+        }
+        return LanguagePreferences(system: languages(kCFPreferencesAnyApplication),
+                                   claude: languages("com.anthropic.claudefordesktop" as CFString))
+    }
+
+    static func displayName(_ identifier: String) -> String {
+        Locale(identifier: "zh_CN").localizedString(forIdentifier: identifier) ?? identifier
+    }
+
+    var systemSummary: String { system?.first ?? "无法读取" }
+    var claudeSummary: String {
+        if let language = claude?.first { return "单独设置：\(language)" }
+        if let language = system?.first { return "跟随系统：\(language)" }
+        return "未单独设置，系统首选语言无法读取"
+    }
+
+    var auditDetail: String { "系统首选：\(systemSummary)；Claude \(claudeSummary)" }
+}
+
 // 超时回调与 waitUntilExit 在不同队列上执行。
 private final class ProcessDeadline {
     private let lock = NSLock()
@@ -83,6 +116,8 @@ final class VM: ObservableObject {
     @Published var settingsMessage = ""
     @Published private(set) var settingsBusy = false
     @Published var showSettingsSheet = false
+    @Published private(set) var languagePreferences = LanguagePreferences(system: nil, claude: nil)
+    @Published private(set) var languageSettingsMessage = ""
 
     static let optionalChecks: [(key: String, label: String)] = [
         ("IP一致", "IP 与上次一致"),
@@ -105,6 +140,8 @@ final class VM: ObservableObject {
     let core: String
     private let checkTimeout: TimeInterval
     private let operationTimeout: TimeInterval
+    private let languagePreferencesReader: () -> LanguagePreferences
+    private let languageSettingsOpener: () -> Bool
     private var started = false
     private var switchRequested = false
     private var checkingUpdate = false
@@ -112,10 +149,16 @@ final class VM: ObservableObject {
     var onSwitchCompleted: (() -> Void)?
 
     init(core: String = NSHomeDirectory() + "/.local/bin/claude-switch.sh",
-         checkTimeout: TimeInterval = 45, operationTimeout: TimeInterval = 180) {
+         checkTimeout: TimeInterval = 45, operationTimeout: TimeInterval = 180,
+         languagePreferencesReader: @escaping () -> LanguagePreferences = LanguagePreferences.read,
+         languageSettingsOpener: @escaping () -> Bool = {
+             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Localization-Settings.extension")!)
+         }) {
         self.core = core
         self.checkTimeout = checkTimeout
         self.operationTimeout = operationTimeout
+        self.languagePreferencesReader = languagePreferencesReader
+        self.languageSettingsOpener = languageSettingsOpener
     }
 
     var canQuit: Bool { !switchRequested && phase != .fixing && phase != .switching }
@@ -242,6 +285,13 @@ final class VM: ObservableObject {
                 }
                 self.rows[idx].detail = status.count > 1 ? status[1] : ""
             }
+            if let languageRow = self.rows.firstIndex(where: { $0.name == "客户端语言" }),
+               self.rows[languageRow].state != .skip, self.rows[languageRow].state != .pending {
+                self.loadLanguagePreferences()
+                let existing = self.rows[languageRow].detail
+                self.rows[languageRow].detail = [existing, self.languagePreferences.auditDetail]
+                    .filter { !$0.isEmpty }.joined(separator: "；")
+            }
             if !result.succeeded {
                 self.banner = result.output.isEmpty ? "核心脚本执行失败" : result.output
                 for i in self.rows.indices where self.rows[i].state == .pending {
@@ -329,6 +379,16 @@ final class VM: ObservableObject {
                 currentClient = parts[1]
             }
         }
+    }
+
+    func loadLanguagePreferences() {
+        languagePreferences = languagePreferencesReader()
+    }
+
+    func openLanguageSettings() {
+        languageSettingsMessage = languageSettingsOpener()
+            ? "调整后请完全退出并重新打开 Claude，再重新检查。"
+            : "无法打开系统设置，请手动进入“通用 → 语言与地区”。"
     }
 
     func loadCheckConfig() {
@@ -778,8 +838,10 @@ struct ContentView: View {
                         Text(row.detail)
                             .font(.system(size: 11.5, weight: .regular, design: isMonospace(row.detail) ? .monospaced : .default))
                             .foregroundColor(row.state == .warn ? ClaudeTheme.warning : ClaudeTheme.muted)
-                            .lineLimit(1)
+                            .lineLimit(row.name == "客户端语言" ? nil : 1)
+                            .fixedSize(horizontal: false, vertical: true)
                             .truncationMode(.middle)
+                            .help(row.detail)
                     }
 
                     stateIcon(row.state)
@@ -1052,6 +1114,47 @@ struct CheckSettingsView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
+                        GroupBox("系统首选语言") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                if let languages = vm.languagePreferences.system {
+                                    ForEach(Array(languages.enumerated()), id: \.offset) { index, language in
+                                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                            Text("\(index + 1).")
+                                                .foregroundColor(ClaudeTheme.muted)
+                                            Text(LanguagePreferences.displayName(language))
+                                                .fixedSize(horizontal: false, vertical: true)
+                                            Spacer(minLength: 6)
+                                            Text(language).foregroundColor(ClaudeTheme.muted)
+                                            if index == 0 {
+                                                Text("首选").font(.caption2)
+                                                    .foregroundColor(ClaudeTheme.terracottaDeep)
+                                            }
+                                        }
+                                        .font(.callout)
+                                    }
+                                } else {
+                                    Text("无法读取系统首选语言，请在系统设置中核对。")
+                                        .font(.caption).foregroundColor(ClaudeTheme.warning)
+                                }
+                                Text("Claude 语言：\(vm.languagePreferences.claudeSummary)")
+                                    .font(.caption).foregroundColor(ClaudeTheme.muted)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Text("按系统设置中的顺序展示，第一项为首选语言；地区格式和时区需分别设置。")
+                                    .font(.caption2).foregroundColor(ClaudeTheme.muted)
+                                HStack {
+                                    Button("打开系统语言与地区…") { vm.openLanguageSettings() }
+                                    Spacer()
+                                    Button("刷新语言") { vm.loadLanguagePreferences() }
+                                }
+                                if !vm.languageSettingsMessage.isEmpty {
+                                    Text(vm.languageSettingsMessage)
+                                        .font(.caption2).foregroundColor(ClaudeTheme.muted)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .padding(.vertical, 6)
+                        }
+
                         GroupBox("可自定义的非关键检查") {
                             VStack(alignment: .leading, spacing: 10) {
                                 ForEach(VM.optionalChecks, id: \.key) { item in
@@ -1110,7 +1213,13 @@ struct CheckSettingsView: View {
         }
         .frame(width: 520, height: 610)
         .preferredColorScheme(.light)
-        .onAppear { vm.loadCheckConfig() }
+        .onAppear {
+            vm.loadLanguagePreferences()
+            vm.loadCheckConfig()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            vm.loadLanguagePreferences()
+        }
     }
 }
 
